@@ -108,17 +108,15 @@ async def on_message(message: discord.Message):
         try:
             messages = list(message_history)
 
-            # TODO: make sure the model is responding to the referenced message if it exists,
-            #  rather than the last message sent in the chat
-
-            # Include referenced message if this is a reply
+            # Include referenced message before the user's current message
             if ref_msg is not None:
                 try:
                     role = "assistant" if ref_msg.author == client.user else "user"
-                    content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
-                    messages.append({
+                    ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
+                    # Insert before the last message (user's current message) so model responds to the user, not the reference
+                    messages.insert(-1, {
                         "role": role,
-                        "content": f"[Referenced message] {content}",
+                        "content": f"[Referenced message] {ref_content}",
                     })
                 except discord.NotFound:
                     pass
@@ -134,7 +132,7 @@ async def on_message(message: discord.Message):
     # failsafe in case the response is empty
     # TODO: figure out why this happens
     if response is None or len(response) == 0:
-        print(f"[ERROR] model generated empty response! user message: {content if content is not None else ""}")
+        print(f"[ERROR] model generated empty response! user message: {message.content}")
         return
 
     # Add bot response to history
