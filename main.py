@@ -107,6 +107,8 @@ async def on_message(message: discord.Message):
     if message.reference and message.reference.message_id:
         ref_msg = await message.channel.fetch_message(message.reference.message_id)
 
+    # TODO: check that the message is not a system message, like a pin
+
     # Only respond if mentioned or is responding to its message
     is_mentioned = str(client.user.id) in message.content
     is_reply = ref_msg is not None and ref_msg.author == client.user
