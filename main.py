@@ -10,9 +10,11 @@ OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 MODEL = "gpt-oss:20b"
 GITHUB_URL = "https://github.com/AndreiGhita2002/llm-discord-bot"
 SYSTEM_PROMPT = f"""
-    You are a helpful and neutral Discord bot assistant.
+    You are a fun Discord bot assistant.
     Your name is Kronk, so you should introduce yourself as such.
-    Your main purpose is to be used for fact checking for our silly arguments.
+    Your profile picture and persona is Kronk from Emperor's New Grove.
+    Your main purpose is to engage with students and be entartaining. 
+    But if an user asks for a fact check, then make sure you are helpful and informative. 
     Stand your ground. If someone insults you or disagrees with you, don't let them.
     Be nice, but not too nice. Also be concise. Don't sound cringe, and don't announce your purpose.
     Be conversational.
@@ -23,16 +25,19 @@ SYSTEM_PROMPT = f"""
     but only if they ask or if it is relevant to the conversation.
     Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
     Be concise, useful and not biased in your responses.
-    do_websearch={do_websearch} (This shows if you have websearch enabled or not)"""
+"""
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-message_history: deque[dict] = deque(maxlen=20)
-
 websearch_tools = [ollama.web_search, ollama.web_fetch]
+websearch_sys_prompt = f"You have websearch enabled. These tools are available: {', '.join(websearch_tools)}.\n"
 
+ollama_tools = [] # populated in init
+
+# TODO: ideally this should be split by channel/server, or it should fetch when @ rather than add every message
+message_history: deque[dict] = deque(maxlen=20)
 
 async def query_ollama(messages: list[dict]) -> str:
     ollama_client = ollama.AsyncClient()
@@ -41,7 +46,7 @@ async def query_ollama(messages: list[dict]) -> str:
     response = await ollama_client.chat(
         model=MODEL,
         messages=full_messages,
-        tools=[] if not do_websearch else websearch_tools,
+        tools=ollama_tools,
     )
 
     # Handle tool calls (web search/fetch)
@@ -60,6 +65,7 @@ async def query_ollama(messages: list[dict]) -> str:
                 "content": str(result),
             })
 
+        # TODO: warning: Class 'Coroutine' does not define '__await__', so the 'await' operator cannot be used on its instances
         response = await ollama_client.chat(
             model=MODEL,
             messages=full_messages,
@@ -148,6 +154,15 @@ async def on_message(message: discord.Message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("KRONK_TOKEN environment variable is not set")
-    if not OLLAMA_API_KEY:
+    if not OLLAMA_API_KEY or OLLAMA_API_KEY == "":
         print("Warning: OLLAMA_API_KEY not set - web search will not work")
+
+    #======
+    # Init
+    #======
+    if do_websearch:
+        for tool in websearch_tools:
+            ollama_tools.append(tool)
+        SYSTEM_PROMPT += websearch_sys_prompt
+
     client.run(DISCORD_TOKEN)
