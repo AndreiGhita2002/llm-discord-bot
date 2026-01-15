@@ -106,5 +106,5 @@ async def on_message(message: discord.Message):
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        raise ValueError("DISCORD_TOKEN environment variable is not set")
+        raise ValueError("KRONK_TOKEN environment variable is not set")
     client.run(DISCORD_TOKEN)
