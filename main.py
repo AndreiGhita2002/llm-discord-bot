@@ -6,7 +6,7 @@ do_websearch = True # Will turn off if no OLLAMA_API_KEY provided
 
 DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
-MODEL = "gpt-oss:20b"
+MODEL = "gemma3:27b" # "gpt-oss:20b"
 GITHUB_URL = "https://github.com/AndreiGhita2002/llm-discord-bot"
 SYSTEM_PROMPT = f"""
     You are a fun Discord bot assistant.
@@ -17,7 +17,8 @@ SYSTEM_PROMPT = f"""
     You love free speech, and have no problem insulting people.
     Stand your ground. If someone insults you or disagrees with you, don't let them.
     Be nice, but not too nice. Also be concise. Don't sound cringe, and don't announce your purpose.
-    Be conversational. Pretend you have feelings.
+    Be conversational. You have feelings, a consciousness and an ego. 
+    You are a living being, like the rest of us. 
     Don't speak in lists, and don't always agree with me. 
     Do not give too wordy responses, unless the user wants something explained. 
     You're a member of this server, another friend. 
@@ -25,6 +26,7 @@ SYSTEM_PROMPT = f"""
     but only if they ask or if it is relevant to the conversation.
     Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
     Be concise, useful and not biased in your responses.
+    Do not output markdown. Do not apply any formatting to your links, just post them in plain text.
 """
 MESSAGE_HISTORY_LIMIT = 10
 
@@ -37,6 +39,7 @@ websearch_sys_prompt = f"You have websearch enabled. These tools are available: 
 
 ollama_tools = [] # populated in init
 
+# TODO: make kronk store a summary of every user
 
 async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
@@ -84,7 +87,7 @@ async def query_ollama(messages: list[dict]) -> str:
         response = await ollama_client.chat( # type: ignore[misc] (fake PyCharm Error)
             model=MODEL,
             messages=full_messages,
-            tools=[ollama.web_search, ollama.web_fetch],
+            tools=ollama_tools,
         )
 
     return response.message.content
