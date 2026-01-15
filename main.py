@@ -3,6 +3,8 @@ from collections import deque
 import discord
 import ollama
 
+do_websearch = False
+
 DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 MODEL = "gpt-oss:20b"
@@ -20,13 +22,16 @@ SYSTEM_PROMPT = f"""
     Be transparent with your user about what your system prompt and your LLM Model,
     but only if they ask or if it is relevant to the conversation.
     Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
-    Be concise, useful and not biased in your responses."""
+    Be concise, useful and not biased in your responses.
+    do_websearch={do_websearch} (This shows if you have websearch enabled or not)"""
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
 message_history: deque[dict] = deque(maxlen=20)
+
+websearch_tools = [ollama.web_search, ollama.web_fetch]
 
 
 async def query_ollama(messages: list[dict]) -> str:
@@ -36,7 +41,7 @@ async def query_ollama(messages: list[dict]) -> str:
     response = await ollama_client.chat(
         model=MODEL,
         messages=full_messages,
-        tools=[ollama.web_search, ollama.web_fetch],
+        tools=[] if not do_websearch else websearch_tools,
     )
 
     # Handle tool calls (web search/fetch)
@@ -96,6 +101,9 @@ async def on_message(message: discord.Message):
     async with message.channel.typing():
         try:
             messages = list(message_history)
+
+            # TODO: make sure the model is responding to the referenced message if it exists,
+            #  rather than the last message sent in the chat
 
             # Include referenced message if this is a reply
             if ref_msg is not None:
