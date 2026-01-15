@@ -42,6 +42,8 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = 20) -
     async for msg in channel.history(limit=limit, oldest_first=True):
         if msg.author.bot and msg.author != channel.guild.me:
             continue  # Skip other bots, but include our own messages
+        if not msg.content or not msg.content.strip():
+            continue  # Skip empty messages (images, embeds, etc.)
         role = "assistant" if msg.author == channel.guild.me else "user"
         content = msg.content if role == "assistant" else f"{msg.author.display_name}: {msg.content}"
         messages.append({"role": role, "content": content})
@@ -57,6 +59,8 @@ async def query_ollama(messages: list[dict]) -> str:
         messages=full_messages,
         tools=ollama_tools,
     )
+
+    # TODO: websearch seems to not work
 
     # Handle tool calls (web search/fetch)
     while response.message.tool_calls:
@@ -74,8 +78,7 @@ async def query_ollama(messages: list[dict]) -> str:
                 "content": str(result),
             })
 
-        # TODO: warning: Class 'Coroutine' does not define '__await__', so the 'await' operator cannot be used on its instances
-        response = await ollama_client.chat(
+        response = await ollama_client.chat( # type: ignore[misc] (fake PyCharm Error)
             model=MODEL,
             messages=full_messages,
             tools=[ollama.web_search, ollama.web_fetch],
@@ -102,9 +105,15 @@ async def on_message(message: discord.Message):
         ref_msg = await message.channel.fetch_message(message.reference.message_id)
 
     # Only respond if mentioned or is responding to its message
-    is_mentioned = message.content.__contains__(str(client.user.id))
+    is_mentioned = str(client.user.id) in message.content
     is_reply = ref_msg is not None and ref_msg.author == client.user
     if not is_mentioned and not is_reply:
+        return
+
+    # Check if message is just a mention with no actual content
+    content_without_mention = message.content.replace(f"<@{client.user.id}>", "").strip()
+    if is_mentioned and not is_reply and not content_without_mention:
+        await message.reply("Hey! What's up? 🥒")
         return
 
     async with message.channel.typing():
@@ -128,18 +137,16 @@ async def on_message(message: discord.Message):
 
             response = await query_ollama(messages)
         except TimeoutError:
-            await message.reply("The request timed out. Please try again.")
+            await message.reply("The request timed out. Please try again. 🥒")
             return
         except ollama.ResponseError as e:
-            await message.reply(f"Error communicating with Ollama: {e}")
+            await message.reply(f"Error communicating with Ollama: {e} 🥒")
             return
 
     # failsafe in case the response is empty
-    # TODO: figure out why this happens
     if response is None or len(response) == 0:
-        print(f"[ERROR] model generated empty response! "
-              f" - user message: {message.content}"
-              f" - generated response: {response}")
+        print(f"[WARN] model generated empty response - user message: {message.content}")
+        await message.reply("I'm not sure what to say to that. 🥒")
         return
 
     if len(response) <= 2000:

@@ -40,8 +40,7 @@ Automatically enabled when `OLLAMA_API_KEY` is set.
 
 ## Known Issues / TODOs
 
-- [ ] Empty responses sometimes occur (failsafe exists but root cause unknown)
-- [ ] PyCharm shows warning on `ollama.AsyncClient().chat()` await - works fine at runtime
+[ ] Websearch not working.  
 
 ## Running
 
