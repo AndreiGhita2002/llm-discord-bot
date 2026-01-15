@@ -1,5 +1,4 @@
 import os
-from collections import deque
 import discord
 import ollama
 
@@ -36,8 +35,18 @@ websearch_sys_prompt = f"You have websearch enabled. These tools are available: 
 
 ollama_tools = [] # populated in init
 
-# TODO: ideally this should be split by channel/server, or it should fetch when @ rather than add every message
-message_history: deque[dict] = deque(maxlen=20)
+
+async def fetch_channel_history(channel: discord.TextChannel, limit: int = 20) -> list[dict]:
+    """Fetch the last N messages from the channel and convert to LLM message format."""
+    messages = []
+    async for msg in channel.history(limit=limit, oldest_first=True):
+        if msg.author.bot and msg.author != channel.guild.me:
+            continue  # Skip other bots, but include our own messages
+        role = "assistant" if msg.author == channel.guild.me else "user"
+        content = msg.content if role == "assistant" else f"{msg.author.display_name}: {msg.content}"
+        messages.append({"role": role, "content": content})
+    return messages
+
 
 async def query_ollama(messages: list[dict]) -> str:
     ollama_client = ollama.AsyncClient()
@@ -87,13 +96,7 @@ async def on_message(message: discord.Message):
     if message.author == client.user:
         return
 
-    # Add all messages to history
-    message_history.append({
-        "role": "user",
-        "content": f"{message.author.display_name}: {message.content}",
-    })
-
-    # fetch the references message if it exists:
+    # fetch the referenced message if it exists:
     ref_msg = None
     if message.reference and message.reference.message_id:
         ref_msg = await message.channel.fetch_message(message.reference.message_id)
@@ -106,20 +109,22 @@ async def on_message(message: discord.Message):
 
     async with message.channel.typing():
         try:
-            messages = list(message_history)
+            # Fetch last 20 messages from this channel
+            messages = await fetch_channel_history(message.channel, limit=20)
 
-            # Include referenced message before the user's current message
+            # If replying to a message not in recent history, add it as context
             if ref_msg is not None:
-                try:
+                ref_msg_in_history = any(
+                    m["content"].endswith(ref_msg.content) for m in messages
+                )
+                if not ref_msg_in_history:
                     role = "assistant" if ref_msg.author == client.user else "user"
                     ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
-                    # Insert before the last message (user's current message) so model responds to the user, not the reference
+                    # Insert before the last message so model responds to the user
                     messages.insert(-1, {
                         "role": role,
                         "content": f"[Referenced message] {ref_content}",
                     })
-                except discord.NotFound:
-                    pass
 
             response = await query_ollama(messages)
         except TimeoutError:
@@ -132,14 +137,10 @@ async def on_message(message: discord.Message):
     # failsafe in case the response is empty
     # TODO: figure out why this happens
     if response is None or len(response) == 0:
-        print(f"[ERROR] model generated empty response! user message: {message.content}")
+        print(f"[ERROR] model generated empty response! "
+              f" - user message: {message.content}"
+              f" - generated response: {response}")
         return
-
-    # Add bot response to history
-    message_history.append({
-        "role": "assistant",
-        "content": response,
-    })
 
     if len(response) <= 2000:
         await message.reply(response)

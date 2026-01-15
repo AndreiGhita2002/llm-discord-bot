@@ -24,8 +24,8 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 
 ## How It Works
 
-1. Bot listens to all messages and stores last 20 in `message_history` deque
-2. Responds when @mentioned or when someone replies to its message
+1. Bot responds when @mentioned or when someone replies to its message
+2. When triggered, fetches the last 20 messages from that channel via `channel.history()`
 3. Referenced messages are inserted *before* the user's current message in context (so model responds to user, not the reference)
 4. Uses `ollama.AsyncClient()` for async LLM calls
 
@@ -40,7 +40,6 @@ Automatically enabled when `OLLAMA_API_KEY` is set.
 
 ## Known Issues / TODOs
 
-- [ ] Message history is global - should be split by channel/server
 - [ ] Empty responses sometimes occur (failsafe exists but root cause unknown)
 - [ ] PyCharm shows warning on `ollama.AsyncClient().chat()` await - works fine at runtime
 
