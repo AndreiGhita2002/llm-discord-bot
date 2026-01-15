@@ -117,6 +117,12 @@ async def on_message(message: discord.Message):
             await message.reply(f"Error communicating with Ollama: {e}")
             return
 
+    # failsafe in case the response is empty
+    # TODO: figure out why this happens
+    if response is None or len(response) == 0:
+        print(f"[ERROR] model generated empty response! user message: {content if content is not None else ""}")
+        return
+
     # Add bot response to history
     message_history.append({
         "role": "assistant",
