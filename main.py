@@ -2,9 +2,9 @@ import os
 import discord
 import httpx
 
-DISCORD_TOKEN = os.environ.get("DISCORD_TOKEN")
+DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
 OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL = "llama3.2"
+MODEL = "gpt-oss:20b"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -28,10 +28,16 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
+    # print(f"Message received: {message.content}")
+
     if message.author == client.user:
         return
 
-    if client.user not in message.mentions:
+    # I do not know why this doesn't work:
+    # if client.user not in message.mentions
+    # Instead I check for the user id in the message:
+    if not message.content.__contains__(str(client.user.id)):
+        # print(f"Was not @ in this message {client.user} {message.mentions}")
         return
 
     prompt = message.content.replace(f"<@{client.user.id}>", "").strip()
