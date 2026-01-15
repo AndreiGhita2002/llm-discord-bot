@@ -3,7 +3,7 @@ from collections import deque
 import discord
 import ollama
 
-do_websearch = False
+do_websearch = True # Will turn off if no OLLAMA_API_KEY provided
 
 DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
@@ -153,6 +153,7 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("KRONK_TOKEN environment variable is not set")
     if not OLLAMA_API_KEY or OLLAMA_API_KEY == "":
+        do_websearch = False
         print("Warning: OLLAMA_API_KEY not set - web search will not work")
 
     #======
