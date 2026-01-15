@@ -2,6 +2,13 @@
 
 A Discord bot powered by a local Ollama LLM with optional web search capabilities.
 
+## AI Instructions
+
+When working on this project, keep the "Known Issues / TODOs" section below up to date:
+- Mark items as complete `[x]` or remove them when fixed
+- Add new TODOs when you discover issues or leave something incomplete
+- Add notes about non-obvious implementation details
+
 ## Project Structure
 
 - `main.py` - Main bot code
@@ -29,7 +36,7 @@ Web search uses Ollama's cloud API (not local), so it requires:
 - `OLLAMA_API_KEY` environment variable set
 - A model that supports tool calling (llama3.1+, qwen3, etc.)
 
-Enable by setting `do_websearch = True` in main.py.
+Automatically enabled when `OLLAMA_API_KEY` is set.
 
 ## Known Issues / TODOs
 
