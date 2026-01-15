@@ -1,10 +1,10 @@
 import os
 from collections import deque
 import discord
-import httpx
+import ollama
 
 DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 MODEL = "gpt-oss:20b"
 GITHUB_URL = "https://github.com/AndreiGhita2002/llm-discord-bot"
 SYSTEM_PROMPT = f"""
@@ -30,17 +30,38 @@ message_history: deque[dict] = deque(maxlen=20)
 
 
 async def query_ollama(messages: list[dict]) -> str:
-    async with httpx.AsyncClient(timeout=120.0) as http_client:
-        response = await http_client.post(
-            OLLAMA_URL,
-            json={
-                "model": MODEL,
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + messages,
-                "stream": False,
-            },
+    ollama_client = ollama.AsyncClient()
+    full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+
+    response = await ollama_client.chat(
+        model=MODEL,
+        messages=full_messages,
+        tools=[ollama.web_search, ollama.web_fetch],
+    )
+
+    # Handle tool calls (web search/fetch)
+    while response.message.tool_calls:
+        for tool in response.message.tool_calls:
+            if tool.function.name == "web_search":
+                result = ollama.web_search(tool.function.arguments["query"])
+            elif tool.function.name == "web_fetch":
+                result = ollama.web_fetch(tool.function.arguments["url"])
+            else:
+                continue
+
+            full_messages.append(response.message)
+            full_messages.append({
+                "role": "tool",
+                "content": str(result),
+            })
+
+        response = await ollama_client.chat(
+            model=MODEL,
+            messages=full_messages,
+            tools=[ollama.web_search, ollama.web_fetch],
         )
-        response.raise_for_status()
-        return response.json()["message"]["content"]
+
+    return response.message.content
 
 
 @client.event
@@ -61,8 +82,15 @@ async def on_message(message: discord.Message):
         "content": f"{message.author.display_name}: {message.content}",
     })
 
-    # Only respond if mentioned
-    if not message.content.__contains__(str(client.user.id)):
+    # fetch the references message if it exists:
+    ref_msg = None
+    if message.reference and message.reference.message_id:
+        ref_msg = await message.channel.fetch_message(message.reference.message_id)
+
+    # Only respond if mentioned or is responding to its message
+    is_mentioned = message.content.__contains__(str(client.user.id))
+    is_reply = ref_msg is not None and ref_msg.author == client.user
+    if not is_mentioned and not is_reply:
         return
 
     async with message.channel.typing():
@@ -70,9 +98,8 @@ async def on_message(message: discord.Message):
             messages = list(message_history)
 
             # Include referenced message if this is a reply
-            if message.reference and message.reference.message_id:
+            if ref_msg is not None:
                 try:
-                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
                     role = "assistant" if ref_msg.author == client.user else "user"
                     content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
                     messages.append({
@@ -83,10 +110,10 @@ async def on_message(message: discord.Message):
                     pass
 
             response = await query_ollama(messages)
-        except httpx.TimeoutException:
+        except TimeoutError:
             await message.reply("The request timed out. Please try again.")
             return
-        except httpx.HTTPError as e:
+        except ollama.ResponseError as e:
             await message.reply(f"Error communicating with Ollama: {e}")
             return
 
@@ -107,4 +134,6 @@ async def on_message(message: discord.Message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("KRONK_TOKEN environment variable is not set")
+    if not OLLAMA_API_KEY:
+        print("Warning: OLLAMA_API_KEY not set - web search will not work")
     client.run(DISCORD_TOKEN)
