@@ -1,0 +1,35 @@
+# Dependencies
+uv.lock
+.venv/
+venv/
+
+# Pycharm
+.idea
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Distribution
+dist/
+build/
+*.egg-info/
+
+# Cache
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
