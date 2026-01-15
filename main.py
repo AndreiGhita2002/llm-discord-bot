@@ -25,21 +25,22 @@ SYSTEM_PROMPT = f"""
     Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
     Be concise, useful and not biased in your responses.
 """
+MESSAGE_HISTORY_LIMIT = 5
 
 intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
 websearch_tools = [ollama.web_search, ollama.web_fetch]
-websearch_sys_prompt = f"You have websearch enabled. These tools are available: {', '.join(websearch_tools)}.\n"
+websearch_sys_prompt = f"You have websearch enabled. These tools are available: {', '.join([str(tool) for tool in websearch_tools])}.\n"
 
 ollama_tools = [] # populated in init
 
 
-async def fetch_channel_history(channel: discord.TextChannel, limit: int = 20) -> list[dict]:
+async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
     messages = []
-    async for msg in channel.history(limit=limit, oldest_first=True):
+    async for msg in channel.history(limit=limit): # TODO: needs to be reversed
         if msg.author.bot and msg.author != channel.guild.me:
             continue  # Skip other bots, but include our own messages
         if not msg.content or not msg.content.strip():
@@ -61,6 +62,7 @@ async def query_ollama(messages: list[dict]) -> str:
     )
 
     # TODO: websearch seems to not work
+    #  gives 401 error (issue with ollama auth I think)
 
     # Handle tool calls (web search/fetch)
     while response.message.tool_calls:
@@ -119,7 +121,8 @@ async def on_message(message: discord.Message):
     async with message.channel.typing():
         try:
             # Fetch last 20 messages from this channel
-            messages = await fetch_channel_history(message.channel, limit=20)
+            messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
+            messages.reverse()
 
             # If replying to a message not in recent history, add it as context
             if ref_msg is not None:
