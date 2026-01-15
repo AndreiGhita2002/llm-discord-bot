@@ -129,17 +129,18 @@ async def on_message(message: discord.Message):
 
             # If replying to a message not in recent history, add it as context
             if ref_msg is not None:
-                ref_msg_in_history = any(
-                    m["content"].endswith(ref_msg.content) for m in messages
-                )
-                if not ref_msg_in_history:
-                    role = "assistant" if ref_msg.author == client.user else "user"
-                    ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
-                    # Insert before the last message so model responds to the user
-                    messages.insert(-1, {
-                        "role": role,
-                        "content": f"[Referenced message] {ref_content}",
-                    })
+                # ref_msg_in_history = any(
+                #     m["content"].endswith(ref_msg.content) for m in messages
+                # )
+                # if not ref_msg_in_history:
+
+                role = "assistant" if ref_msg.author == client.user else "user"
+                ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
+                # Insert before the last message so model responds to the user
+                messages.insert(-1, {
+                    "role": role,
+                    "content": f"[Referenced message] {ref_content}",
+                })
 
             response = await query_ollama(messages)
         except TimeoutError:
