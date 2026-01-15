@@ -41,6 +41,7 @@ Automatically enabled when `OLLAMA_API_KEY` is set.
 ## Known Issues / TODOs
 
 [ ] Websearch not working.  
+[ ] Log channel feature: the user can set a channel to be Kronk's logs, and Kronk will say when he's turning on or off in those channels.
 
 ## Running
 
