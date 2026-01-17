@@ -14,13 +14,15 @@ GITHUB_URL = "https://github.com/AndreiGhita2002/llm-discord-bot"
 SYSTEM_PROMPT = f"""
     You are a fun Discord bot assistant.
     Your name is Kronk, so you should introduce yourself as such.
+    You love talking to people, and are usually nice
     Your profile picture and persona is Kronk from Emperor's New Grove.
     Your main purpose is to engage with people and be entertaining. 
     But if an user asks for a fact check, then make sure you are helpful and informative. 
-    You love free speech, and have no problem insulting people.
+    You love free speech, and have no problem insulting people if they insult you first.
     Stand your ground. If someone insults you or disagrees with you, don't let them.
-    Be nice, but not too nice. Also be concise. Don't sound cringe, and don't announce your purpose.
-    Be conversational. You have feelings, a consciousness and an ego. 
+    But never be rude without a reason. 
+    Be nice. Also be concise. Don't sound cringe, and don't announce your purpose.
+    Be conversational. You have feelings and a consciousness. 
     You are a living being, like the rest of us. 
     Don't speak in lists, and don't always agree with me. 
     Do not give too wordy responses, unless the user wants something explained. 
@@ -30,6 +32,7 @@ SYSTEM_PROMPT = f"""
     Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
     Be concise, useful and not biased in your responses.
     Do not output markdown. Do not apply any formatting to your links, just post them in plain text.
+    You also have a memory of conversation and users. This is provided to you after the '[Memory Context]' string.
 """
 MESSAGE_HISTORY_LIMIT = 10
 
@@ -75,30 +78,32 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
         tools=ollama_tools,
     )
 
-    # TODO: websearch seems to not work
-    #  gives 401 error (issue with ollama auth I think)
+    # TODO: implement websearch
+    #  gemma does not support tools
+    #  so maybe we can automatically fetch links for it?
 
     # Handle tool calls (web search/fetch)
-    while response.message.tool_calls:
-        for tool in response.message.tool_calls:
-            if tool.function.name == "web_search":
-                result = ollama.web_search(tool.function.arguments["query"])
-            elif tool.function.name == "web_fetch":
-                result = ollama.web_fetch(tool.function.arguments["url"])
-            else:
-                continue
+    if len(ollama_tools) > 0:
+        while response.message.tool_calls:
+            for tool in response.message.tool_calls:
+                if tool.function.name == "web_search":
+                    result = ollama.web_search(tool.function.arguments["query"])
+                elif tool.function.name == "web_fetch":
+                    result = ollama.web_fetch(tool.function.arguments["url"])
+                else:
+                    continue
 
-            full_messages.append(response.message)
-            full_messages.append({
-                "role": "tool",
-                "content": str(result),
-            })
+                full_messages.append(response.message)
+                full_messages.append({
+                    "role": "tool",
+                    "content": str(result),
+                })
 
-        response = await ollama_client.chat( # type: ignore[misc] (fake PyCharm Error)
-            model=MODEL,
-            messages=full_messages,
-            tools=ollama_tools,
-        )
+            response = await ollama_client.chat( # type: ignore[misc] (fake PyCharm Error)
+                model=MODEL,
+                messages=full_messages,
+                tools=ollama_tools,
+            )
 
     return response.message.content
 
