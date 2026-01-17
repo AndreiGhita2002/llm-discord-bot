@@ -15,7 +15,8 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 - `memory.py` - Lightweight memory system (user summaries + conversation recall)
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
-- `kronk_memory/` - Created at runtime, stores user summaries and conversation embeddings
+- `setup-memory.sh` - Initializes memory directory and pulls embedding model
+- `kronk_memory/` - Created by setup script, stores user summaries and conversation embeddings (gitignored)
 
 ## Key Configuration
 
@@ -63,6 +64,9 @@ Kronk has a lightweight memory system (`memory.py`) that provides:
 ```bash
 # Install dependencies
 uv sync
+
+# Setup memory system (creates directory + pulls embedding model)
+./setup-memory.sh
 
 # Set environment variables
 export KRONK_TOKEN="your-discord-token"

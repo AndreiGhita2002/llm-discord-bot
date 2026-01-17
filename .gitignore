@@ -33,3 +33,6 @@ build/
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
+
+# Kronk memory (user data, conversation history)
+kronk_memory/
