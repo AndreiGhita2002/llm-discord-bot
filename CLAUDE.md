@@ -12,8 +12,10 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 ## Project Structure
 
 - `main.py` - Main bot code
+- `memory.py` - Lightweight memory system (user summaries + conversation recall)
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
+- `kronk_memory/` - Created at runtime, stores user summaries and conversation embeddings
 
 ## Key Configuration
 
@@ -37,6 +39,19 @@ Web search uses Ollama's cloud API (not local), so it requires:
 - A model that supports tool calling (llama3.1+, qwen3, etc.)
 
 Automatically enabled when `OLLAMA_API_KEY` is set.
+
+## Memory System
+
+Kronk has a lightweight memory system (`memory.py`) that provides:
+
+1. **User Summaries**: LLM-generated summaries of each user (personality, interests, facts). Updated probabilistically (20% chance after each interaction) to avoid overhead.
+
+2. **Conversation Recall**: Stores conversation snippets with embeddings for semantic search. When a user sends a message, relevant past conversations are retrieved and injected into context.
+
+**Requirements**:
+- Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text`
+- Data stored in `./kronk_memory/` directory (JSON files)
+- Keeps last 500 conversations max to prevent unbounded growth
 
 ## Known Issues / TODOs
 

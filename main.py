@@ -1,6 +1,9 @@
 import os
+import random
 import discord
 import ollama
+
+import memory
 
 do_websearch = True # Will turn off if no OLLAMA_API_KEY provided
 
@@ -39,7 +42,8 @@ websearch_sys_prompt = f"You have websearch enabled. These tools are available: 
 
 ollama_tools = [] # populated in init
 
-# TODO: make kronk store a summary of every user
+# Memory: chance to update user summary after each interaction (1 in 5)
+USER_SUMMARY_CHANCE = 0.2
 
 async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
@@ -55,9 +59,15 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
     return messages
 
 
-async def query_ollama(messages: list[dict]) -> str:
+async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
     ollama_client = ollama.AsyncClient()
-    full_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + messages
+
+    # Build system prompt with optional memory context
+    system_content = SYSTEM_PROMPT
+    if memory_context:
+        system_content += f"\n\n[Memory Context]\n{memory_context}\n"
+
+    full_messages = [{"role": "system", "content": system_content}] + messages
 
     response = await ollama_client.chat(
         model=MODEL,
@@ -133,11 +143,6 @@ async def on_message(message: discord.Message):
 
                 # If replying to a message not in recent history, add it as context
                 if ref_msg is not None:
-                    # ref_msg_in_history = any(
-                    #     m["content"].endswith(ref_msg.content) for m in messages
-                    # )
-                    # if not ref_msg_in_history:
-
                     role = "assistant" if ref_msg.author == client.user else "user"
                     ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
                     # Insert before the last message so model responds to the user
@@ -146,7 +151,36 @@ async def on_message(message: discord.Message):
                         "content": f"[Referenced message] {ref_content}",
                     })
 
-                response = await query_ollama(messages)
+                # Build memory context for this user/channel
+                memory_context = memory.build_memory_context(
+                    user_id=str(message.author.id),
+                    current_message=content_without_mention or message.content,
+                    channel_id=str(message.channel.id)
+                )
+
+                response = await query_ollama(messages, memory_context=memory_context)
+
+                # Store this conversation for future recall
+                try:
+                    memory.store_conversation(
+                        channel_id=str(message.channel.id),
+                        messages=messages
+                    )
+                except Exception as mem_err:
+                    print(f"[WARN] Failed to store conversation: {mem_err}")
+
+                # Occasionally update user summary (async, don't block response)
+                if random.random() < USER_SUMMARY_CHANCE:
+                    try:
+                        await memory.generate_user_summary(
+                            user_id=str(message.author.id),
+                            user_name=message.author.display_name,
+                            recent_messages=messages,
+                            model=MODEL
+                        )
+                    except Exception as sum_err:
+                        print(f"[WARN] Failed to generate user summary: {sum_err}")
+
             except TimeoutError:
                 await message.reply("The request timed out. Please try again. 🥒")
                 return
