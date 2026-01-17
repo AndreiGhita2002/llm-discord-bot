@@ -124,34 +124,40 @@ async def on_message(message: discord.Message):
         await message.reply("Hey! What's up? 🥒")
         return
 
-    async with message.channel.typing():
-        try:
-            # Fetch last 20 messages from this channel
-            messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
-            messages.reverse()
+    try:
+        async with message.channel.typing():
+            try:
+                # Fetch last 20 messages from this channel
+                messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
+                messages.reverse()
 
-            # If replying to a message not in recent history, add it as context
-            if ref_msg is not None:
-                # ref_msg_in_history = any(
-                #     m["content"].endswith(ref_msg.content) for m in messages
-                # )
-                # if not ref_msg_in_history:
+                # If replying to a message not in recent history, add it as context
+                if ref_msg is not None:
+                    # ref_msg_in_history = any(
+                    #     m["content"].endswith(ref_msg.content) for m in messages
+                    # )
+                    # if not ref_msg_in_history:
 
-                role = "assistant" if ref_msg.author == client.user else "user"
-                ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
-                # Insert before the last message so model responds to the user
-                messages.insert(-1, {
-                    "role": role,
-                    "content": f"[Referenced message] {ref_content}",
-                })
+                    role = "assistant" if ref_msg.author == client.user else "user"
+                    ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
+                    # Insert before the last message so model responds to the user
+                    messages.insert(-1, {
+                        "role": role,
+                        "content": f"[Referenced message] {ref_content}",
+                    })
 
-            response = await query_ollama(messages)
-        except TimeoutError:
-            await message.reply("The request timed out. Please try again. 🥒")
-            return
-        except ollama.ResponseError as e:
-            await message.reply(f"Error communicating with Ollama: {e} 🥒")
-            return
+                response = await query_ollama(messages)
+            except TimeoutError:
+                await message.reply("The request timed out. Please try again. 🥒")
+                return
+            except ollama.ResponseError as e:
+                await message.reply(f"Error communicating with Ollama: {e} 🥒")
+                return
+
+    except Exception as e:
+        await message.reply(f"<Weird Error>  🥒")
+        print(f"<Weird Error> {e} 🥒")
+        return
 
     # failsafe in case the response is empty
     if response is None or len(response) == 0:
