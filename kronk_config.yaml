@@ -48,13 +48,10 @@ github_url: "https://github.com/AndreiGhita2002/llm-discord-bot"
 # Memory storage directory
 memory_dir: "./bot_memory"
 
+# Web search (requires OLLAMA_API_KEY env var)
+web_search: false
+
 # Tools configuration
 # TODO: Implement tool system
 # tools:
 #   enabled: []
-#   web_search:
-#     enabled: false
-#     requires_api_key: true
-#   web_fetch:
-#     enabled: false
-#     requires_api_key: true

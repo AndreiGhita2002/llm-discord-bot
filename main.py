@@ -28,10 +28,11 @@ def load_config(config_path: str = "config.yaml") -> dict:
 
 CONFIG = load_config()
 
-do_websearch = True  # Will turn off if no OLLAMA_API_KEY provided
-
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
+
+# Web search requires both config enabled and API key present
+do_websearch = CONFIG.get("web_search", False) and bool(OLLAMA_API_KEY)
 
 # Load from config
 MODEL = CONFIG.get("model", "gemma3:27b")
