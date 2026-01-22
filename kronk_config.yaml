@@ -26,9 +26,10 @@ system_prompt: |
   Your source code is accessible at {{github_url}}, so mention it if the user asks.
   Be concise, useful and not biased in your responses.
   Do not output markdown. Do not apply any formatting to your links, just post them in plain text.
-  You also have a memory of conversation and users. This is provided to you after the '[Memory Context]' string.
 
 # Message history settings
+# Represent the bot's short term memories
+# i.e. what is being currently talked about in the conversation
 message_history:
   # Number of recent messages to fetch for context
   limit: 10
@@ -36,7 +37,17 @@ message_history:
   include_other_bots: false
 
 # Memory system settings
+# Represent the bot's long term memories
 memory:
+  # One place toggle for all memory related settings.
+  # If this is false then all other settings in this category will be ignored
+  do_memory: true
+
+  # Should the bot have specific memories about users?
+  user_memory: true
+  # Should the bot remember past conversations?
+  conversation_memory: true
+
   # Probability of updating user summary after each interaction (0.0 to 1.0)
   user_summary_update_chance: 0.2
   # Maximum conversations to store

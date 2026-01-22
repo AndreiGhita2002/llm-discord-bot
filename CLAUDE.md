@@ -11,6 +11,13 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 - Add new TODOs when you discover issues or leave something incomplete
 - Add notes about non-obvious implementation details
 
+When updating the changelog in README.md:
+- Group all changes from the same day under one version
+- Check the date of the last commit (`git log -1 --format=%cd --date=short`) - if it's today, add to that version
+- Only increment the patch version (smallest digit) if last commit was a different day
+- Only increment minor/major version if the user explicitly says it's a major change
+- Today's date is available in the environment info at the start of the conversation
+
 ## Project Structure
 
 - `main.py` - Main bot code
@@ -27,8 +34,13 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 Configuration is loaded from `config.yaml`:
 - **Model**: Configurable in `config.yaml` (default: `gemma3:27b`)
 - **System prompt**: Customizable personality/behavior in `config.yaml`
-- **Message history**: Limit and settings in `config.yaml`
-- **Memory settings**: User summary chance, max conversations in `config.yaml`
+- **Message history**: Limit and settings in `config.yaml` (short-term memory)
+- **Memory settings**: Long-term memory with granular toggles:
+  - `do_memory`: Master toggle for all memory features
+  - `user_memory`: Toggle user-specific summaries
+  - `conversation_memory`: Toggle conversation recall
+  - `user_summary_update_chance`: Probability of updating user summary (0.0-1.0)
+  - `max_stored_conversations`: Maximum conversations to store
 - **Tools**: TODO - placeholder in `config.yaml` for future implementation
 
 Environment variables:
@@ -56,9 +68,11 @@ Automatically enabled when `OLLAMA_API_KEY` is set.
 
 The bot has a lightweight memory system (`memory.py`) that provides:
 
-1. **User Summaries**: LLM-generated summaries of each user (personality, interests, facts). Updated probabilistically (20% chance after each interaction) to avoid overhead.
+1. **User Summaries** (`user_memory`): LLM-generated summaries of each user (personality, interests, facts). Updated probabilistically (configurable chance) to avoid overhead.
 
-2. **Conversation Recall**: Stores conversation snippets with embeddings for semantic search. When a user sends a message, relevant past conversations are retrieved and injected into context.
+2. **Conversation Recall** (`conversation_memory`): Stores conversation snippets with embeddings for semantic search. When a user sends a message, relevant past conversations are retrieved and injected into context.
+
+Both features can be independently toggled via config. The `do_memory` flag is a master switch that disables all memory features when false.
 
 **Requirements**:
 - Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text`

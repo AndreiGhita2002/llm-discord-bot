@@ -8,7 +8,8 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 
 - Runs on a local LLM via Ollama (no cloud API costs for basic usage)
 - Responds when @mentioned or when you reply to its messages
-- Remembers the last 20 messages for context
+- Configurable message history for conversation context
+- **Memory system** with user summaries and conversation recall (can be toggled on/off)
 - Optional web search capability for up-to-date information
 
 ## Requirements
@@ -63,7 +64,27 @@ The bot can search the web for current information. This feature uses Ollama's c
    export OLLAMA_API_KEY="your-api-key"
    ```
 
-Web search is automatically enabled when the API key is present.
+Web search is automatically enabled when the API key is present and `web_search: true` in config.
+
+## Memory System
+
+The bot has a lightweight long-term memory system that can be configured in `config.yaml`:
+
+```yaml
+memory:
+  do_memory: true              # Master toggle for all memory features
+  user_memory: true            # Remember facts about individual users
+  conversation_memory: true    # Recall relevant past conversations
+  user_summary_update_chance: 0.2  # Probability of updating user summary (0.0-1.0)
+  max_stored_conversations: 500    # Maximum conversations to store
+```
+
+**Setup**: Run `./setup-memory.sh` to initialize the memory directory and pull the embedding model.
+
+When enabled, the bot will:
+- Build summaries of users based on their messages (personality, interests, facts)
+- Store conversation snippets with semantic embeddings
+- Recall relevant past conversations when responding
 
 ## Running as a Service (macOS)
 
@@ -88,6 +109,8 @@ Use the included script to set up the bot as a launchd daemon:
 - **Renamed env var**: `KRONK_TOKEN` → `DISCORD_BOT_TOKEN` (old name still works for backward compatibility)
 - **Renamed memory directory**: `kronk_memory/` → `bot_memory/` (old directory still works for backward compatibility)
 - **Added PyYAML dependency** for config loading
+- **Granular memory controls**: New config options to toggle memory features independently (`do_memory`, `user_memory`, `conversation_memory`)
+- **Configurable conversation limit**: `max_stored_conversations` now read from config
 
 ### v0.1.0
 

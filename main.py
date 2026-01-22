@@ -49,10 +49,15 @@ websearch_sys_prompt = f"You have websearch enabled. These tools are available: 
 
 ollama_tools = []  # populated in init
 
+do_memory = CONFIG.get("memory", {}).get("do_memory", False)
+do_user_memory = CONFIG.get("memory", {}).get("user_memory", False)
+do_conversation_memory = CONFIG.get("memory", {}).get("conversation_memory", False)
+max_stored_conversations = CONFIG.get("memory", {}).get("max_stored_conversations", 500)
+
 async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
     messages = []
-    async for msg in channel.history(limit=limit): # TODO: needs to be reversed
+    async for msg in channel.history(limit=limit):
         if msg.author.bot and msg.author != channel.guild.me:
             continue  # Skip other bots, but include our own messages
         if not msg.content or not msg.content.strip():
@@ -158,34 +163,42 @@ async def on_message(message: discord.Message):
                     })
 
                 # Build memory context for this user/channel
-                memory_context = memory.build_memory_context(
-                    user_id=str(message.author.id),
-                    current_message=content_without_mention or message.content,
-                    channel_id=str(message.channel.id)
-                )
+                memory_context = None
+                if do_memory:
+                    memory_context = memory.build_memory_context(
+                        user_id=str(message.author.id),
+                        current_message=content_without_mention or message.content,
+                        channel_id=str(message.channel.id),
+                        do_user_memory=do_user_memory,
+                        do_conversation_memory=do_conversation_memory,
+                    )
 
                 response = await query_ollama(messages, memory_context=memory_context)
 
                 # Store this conversation for future recall
-                try:
-                    memory.store_conversation(
-                        channel_id=str(message.channel.id),
-                        messages=messages
-                    )
-                except Exception as mem_err:
-                    print(f"[WARN] Failed to store conversation: {mem_err}")
+                if do_memory and do_conversation_memory:
+                    try:
+                        memory.store_conversation(
+                            channel_id=str(message.channel.id),
+                            messages=messages,
+                            max_conversations=max_stored_conversations
+                        )
+                    except Exception as mem_err:
+                        print(f"[WARN] Failed to store conversation: {mem_err}")
 
                 # Occasionally update user summary (async, don't block response)
-                if random.random() < USER_SUMMARY_CHANCE:
-                    try:
-                        await memory.generate_user_summary(
-                            user_id=str(message.author.id),
-                            user_name=message.author.display_name,
-                            recent_messages=messages,
-                            model=MODEL
-                        )
-                    except Exception as sum_err:
-                        print(f"[WARN] Failed to generate user summary: {sum_err}")
+                if do_memory and do_user_memory:
+                    #TODO: we could use some basic language analysis to determine if the user said anything important
+                    if random.random() < USER_SUMMARY_CHANCE:
+                        try:
+                            await memory.generate_user_summary(
+                                user_id=str(message.author.id),
+                                user_name=message.author.display_name,
+                                recent_messages=messages,
+                                model=MODEL
+                            )
+                        except Exception as sum_err:
+                            print(f"[WARN] Failed to generate user summary: {sum_err}")
 
             except TimeoutError:
                 await message.reply("The request timed out. Please try again. 🥒")
@@ -223,7 +236,11 @@ if __name__ == "__main__":
     #======
     # Init
     #======
-    memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
+    if do_memory:
+        memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
+
+    if do_memory:
+        SYSTEM_PROMPT += "\nYou have a memory of conversations and users. This is provided to you after the '[Memory Context]' string."
 
     if do_websearch:
         for tool in websearch_tools:

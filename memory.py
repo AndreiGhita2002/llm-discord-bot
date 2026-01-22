@@ -159,7 +159,8 @@ def generate_conv_id(channel_id: str, timestamp: str) -> str:
 def store_conversation(
     channel_id: str,
     messages: list[dict],
-    summary: str = None
+    summary: str = None,
+    max_conversations: int = 500
 ):
     """
     Store a conversation snippet for later semantic retrieval.
@@ -190,9 +191,9 @@ def store_conversation(
         "message_count": len(messages)
     })
 
-    # Keep only last 500 conversations to prevent unbounded growth
-    if len(conversations) > 500:
-        conversations = conversations[-500:]
+    # Keep only last N conversations to prevent unbounded growth
+    if len(conversations) > max_conversations:
+        conversations = conversations[-max_conversations:]
 
     save_conversations(conversations)
 
@@ -262,7 +263,9 @@ async def generate_conversation_summary(
 def build_memory_context(
     user_id: str,
     current_message: str,
-    channel_id: str = None
+    channel_id: str = None,
+    do_user_memory: bool = False,
+    do_conversation_memory: bool = False,
 ) -> str | None:
     """
     Build a memory context string to inject into the system prompt.
@@ -271,18 +274,20 @@ def build_memory_context(
     context_parts = []
 
     # Add user summary if available
-    user_summary = get_user_summary(user_id)
-    if user_summary:
-        context_parts.append(f"About this user: {user_summary}")
+    if do_user_memory:
+        user_summary = get_user_summary(user_id)
+        if user_summary:
+            context_parts.append(f"About this user: {user_summary}")
 
     # Add relevant past conversations
-    relevant = recall_relevant_conversations(
-        current_message,
-        n_results=2,
-        channel_id=channel_id
-    )
-    if relevant:
-        context_parts.append("Relevant past conversations:\n" + "\n---\n".join(relevant))
+    if do_conversation_memory:
+        relevant = recall_relevant_conversations(
+            current_message,
+            n_results=2,
+            channel_id=channel_id
+        )
+        if relevant:
+            context_parts.append("Relevant past conversations:\n" + "\n---\n".join(relevant))
 
     if context_parts:
         return "\n\n".join(context_parts)
