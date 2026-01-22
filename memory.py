@@ -1,5 +1,5 @@
 """
-Lightweight memory system for Kronk using Ollama embeddings for semantic search
+Lightweight memory system for Discord bots using Ollama embeddings for semantic search
 and LLM-generated user summaries.
 
 Uses Ollama's embedding API + simple JSON storage - no heavy dependencies.
@@ -14,13 +14,34 @@ import ollama
 
 # === Storage Setup ===
 
-MEMORY_DIR = Path("./kronk_memory")
-MEMORY_DIR.mkdir(exist_ok=True)
-
-USER_SUMMARIES_FILE = MEMORY_DIR / "user_summaries.json"
-CONVERSATIONS_FILE = MEMORY_DIR / "conversations.json"
+MEMORY_DIR: Path = None
+USER_SUMMARIES_FILE: Path = None
+CONVERSATIONS_FILE: Path = None
 
 EMBEDDING_MODEL = "nomic-embed-text"  # Small, fast embedding model
+
+
+def init_memory(memory_dir: str = "./bot_memory"):
+    """Initialize memory system with the specified directory.
+
+    Falls back to legacy 'kronk_memory/' directory if it exists and the
+    configured directory does not, for backward compatibility.
+    """
+    global MEMORY_DIR, USER_SUMMARIES_FILE, CONVERSATIONS_FILE
+
+    configured_path = Path(memory_dir)
+    legacy_path = Path("./kronk_memory")
+
+    # Use legacy directory if it exists and configured one doesn't
+    if not configured_path.exists() and legacy_path.exists():
+        MEMORY_DIR = legacy_path
+        print(f"[memory] Using legacy directory: {legacy_path}")
+    else:
+        MEMORY_DIR = configured_path
+        MEMORY_DIR.mkdir(exist_ok=True)
+
+    USER_SUMMARIES_FILE = MEMORY_DIR / "user_summaries.json"
+    CONVERSATIONS_FILE = MEMORY_DIR / "conversations.json"
 
 
 # === Embedding Utilities ===

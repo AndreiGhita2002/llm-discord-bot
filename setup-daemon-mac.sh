@@ -60,13 +60,13 @@ if ! command -v uv &> /dev/null; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# Check if KRONK_TOKEN is set
-if [ -z "$KRONK_TOKEN" ]; then
-    echo -e "${YELLOW}Warning: KRONK_TOKEN environment variable is not set.${NC}"
+# Check if DISCORD_BOT_TOKEN is set
+if [ -z "$DISCORD_BOT_TOKEN" ]; then
+    echo -e "${YELLOW}Warning: DISCORD_BOT_TOKEN environment variable is not set.${NC}"
     echo "You'll need to set it in the plist file or export it before loading the daemon."
-    read -p "Enter your KRONK_TOKEN (or press Enter to skip): " TOKEN_INPUT
+    read -p "Enter your DISCORD_BOT_TOKEN (or press Enter to skip): " TOKEN_INPUT
     if [ -n "$TOKEN_INPUT" ]; then
-        KRONK_TOKEN="$TOKEN_INPUT"
+        DISCORD_BOT_TOKEN="$TOKEN_INPUT"
     fi
 fi
 
@@ -217,8 +217,8 @@ cat > "$PLIST_PATH" << PLIST_EOF
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:${EXPANDED_HOME}/.local/bin:${EXPANDED_HOME}/.cargo/bin</string>
         <key>HOME</key>
         <string>${EXPANDED_HOME}</string>
-        <key>KRONK_TOKEN</key>
-        <string>${KRONK_TOKEN:-YOUR_TOKEN_HERE}</string>
+        <key>DISCORD_BOT_TOKEN</key>
+        <string>${DISCORD_BOT_TOKEN:-YOUR_TOKEN_HERE}</string>
         <key>UPDATE_CHECK_INTERVAL</key>
         <string>${UPDATE_CHECK_INTERVAL}</string>
         <key>GIT_BRANCH</key>
@@ -251,8 +251,8 @@ echo ""
 echo -e "${YELLOW}=== Important Notes ===${NC}"
 echo ""
 
-if [ -z "$KRONK_TOKEN" ] || [ "$KRONK_TOKEN" = "YOUR_TOKEN_HERE" ]; then
-    echo -e "${RED}1. You MUST edit the plist to add your KRONK_TOKEN:${NC}"
+if [ -z "$DISCORD_BOT_TOKEN" ] || [ "$DISCORD_BOT_TOKEN" = "YOUR_TOKEN_HERE" ]; then
+    echo -e "${RED}1. You MUST edit the plist to add your DISCORD_BOT_TOKEN:${NC}"
     echo "   nano $PLIST_PATH"
     echo "   (Replace YOUR_TOKEN_HERE with your actual token)"
     echo ""

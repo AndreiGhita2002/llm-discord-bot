@@ -1,6 +1,8 @@
-# Kronk - Discord LLM Bot
+# Discord LLM Bot
 
-A Discord bot powered by a local Ollama LLM. Kronk is designed to be a fun, conversational member of your server who can also help with fact-checking.
+A Discord bot powered by a local Ollama LLM with a configurable personality. Ships with **Kronk** (from Emperor's New Groove) as the default persona - a fun, conversational member of your server who can also help with fact-checking.
+
+All bot settings (model, personality, memory) are customizable via `config.yaml`.
 
 ## Features
 
@@ -37,7 +39,7 @@ A Discord bot powered by a local Ollama LLM. Kronk is designed to be a fun, conv
 
 4. **Configure environment variables**
    ```bash
-   export KRONK_TOKEN="your-discord-bot-token"
+   export DISCORD_BOT_TOKEN="your-discord-bot-token"
    ```
 
 5. **Run the bot**
@@ -47,7 +49,7 @@ A Discord bot powered by a local Ollama LLM. Kronk is designed to be a fun, conv
 
 ## Web Search (Optional)
 
-Kronk can search the web for current information. This feature uses Ollama's cloud API.
+The bot can search the web for current information. This feature uses Ollama's cloud API.
 
 1. Get a free API key from https://ollama.com/settings/keys
 2. Set the environment variable:
@@ -59,7 +61,7 @@ Web search is automatically enabled when the API key is present.
 
 ## Running as a Service (macOS)
 
-Use the included script to set up Kronk as a launchd daemon:
+Use the included script to set up the bot as a launchd daemon:
 
 ```bash
 ./setup-daemon-mac.sh
@@ -69,6 +71,23 @@ Use the included script to set up Kronk as a launchd daemon:
 
 - **@mention** the bot to get a response
 - **Reply** to any of the bot's messages to continue the conversation
+
+## Changelog
+
+### v0.2.0
+
+- **Configuration file**: All bot settings now live in `config.yaml` (model, system prompt, message history, memory settings)
+- **Bot-agnostic codebase**: Code no longer hardcodes "Kronk" - personality is fully configurable
+- **Renamed env var**: `KRONK_TOKEN` → `DISCORD_BOT_TOKEN` (old name still works for backward compatibility)
+- **Renamed memory directory**: `kronk_memory/` → `bot_memory/` (old directory still works for backward compatibility)
+- **Added PyYAML dependency** for config loading
+
+### v0.1.0
+
+- Initial release
+- Basic Discord bot with Ollama integration
+- Memory system with user summaries and conversation recall
+- Optional web search via Ollama cloud API
 
 ## License
 

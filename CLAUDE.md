@@ -1,6 +1,8 @@
-# Kronk Discord Bot
+# Discord LLM Bot
 
 A Discord bot powered by a local Ollama LLM with optional web search capabilities.
+
+**Default persona: Kronk** - The default configuration ships with "Kronk" (from Emperor's New Groove) as the bot personality, but this is fully customizable via `config.yaml`.
 
 ## AI Instructions
 
@@ -12,16 +14,24 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 ## Project Structure
 
 - `main.py` - Main bot code
+- `config.yaml` - Bot configuration (model, system prompt, message history, tools)
 - `memory.py` - Lightweight memory system (user summaries + conversation recall)
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
 - `setup-memory.sh` - Initializes memory directory and pulls embedding model
-- `kronk_memory/` - Created by setup script, stores user summaries and conversation embeddings (gitignored)
+- `bot_memory/` - Created by setup script, stores user summaries and conversation embeddings (gitignored)
 
 ## Key Configuration
 
-- **Model**: `gpt-oss:20b` (local Ollama model, but it might change)
-- **Discord token**: `KRONK_TOKEN` env var
+Configuration is loaded from `config.yaml`:
+- **Model**: Configurable in `config.yaml` (default: `gemma3:27b`)
+- **System prompt**: Customizable personality/behavior in `config.yaml`
+- **Message history**: Limit and settings in `config.yaml`
+- **Memory settings**: User summary chance, max conversations in `config.yaml`
+- **Tools**: TODO - placeholder in `config.yaml` for future implementation
+
+Environment variables:
+- **Discord token**: `DISCORD_BOT_TOKEN` env var (falls back to `KRONK_TOKEN` for backward compatibility)
 - **Ollama API key**: `OLLAMA_API_KEY` env var (only needed for web search)
 - **Web search**: Only enabled if `OLLAMA_API_KEY` is found
 
@@ -43,7 +53,7 @@ Automatically enabled when `OLLAMA_API_KEY` is set.
 
 ## Memory System
 
-Kronk has a lightweight memory system (`memory.py`) that provides:
+The bot has a lightweight memory system (`memory.py`) that provides:
 
 1. **User Summaries**: LLM-generated summaries of each user (personality, interests, facts). Updated probabilistically (20% chance after each interaction) to avoid overhead.
 
@@ -51,13 +61,15 @@ Kronk has a lightweight memory system (`memory.py`) that provides:
 
 **Requirements**:
 - Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text`
-- Data stored in `./kronk_memory/` directory (JSON files)
+- Data stored in `./bot_memory/` directory (configurable via `memory_dir` in config.yaml)
+- Backward compatible: falls back to `./kronk_memory/` if it exists
 - Keeps last 500 conversations max to prevent unbounded growth
 
 ## Known Issues / TODOs
 
-[ ] Websearch not working.  
-[ ] Log channel feature: the user can set a channel to be Kronk's logs, and Kronk will say when he's turning on or off in those channels.
+[ ] Websearch not working.
+[ ] Log channel feature: the user can set a channel for bot logs, and the bot will announce when it's turning on or off.
+[ ] Implement configurable tools system in config.yaml.
 
 ## Running
 
@@ -69,7 +81,7 @@ uv sync
 ./setup-memory.sh
 
 # Set environment variables
-export KRONK_TOKEN="your-discord-token"
+export DISCORD_BOT_TOKEN="your-discord-token"
 export OLLAMA_API_KEY="your-ollama-key"  # optional, for web search
 
 # Run

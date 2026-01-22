@@ -2,39 +2,36 @@ import os
 import random
 import discord
 import ollama
+import yaml
 
 import memory
 
-do_websearch = True # Will turn off if no OLLAMA_API_KEY provided
 
-DISCORD_TOKEN = os.environ.get("KRONK_TOKEN")
+def load_config(config_path: str = "config.yaml") -> dict:
+    """Load configuration from YAML file."""
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+
+    # Template substitution for system prompt
+    system_prompt = config.get("system_prompt", "")
+    system_prompt = system_prompt.replace("{{github_url}}", config.get("github_url", ""))
+    config["system_prompt"] = system_prompt
+
+    return config
+
+
+CONFIG = load_config()
+
+do_websearch = True  # Will turn off if no OLLAMA_API_KEY provided
+
+DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
-MODEL = "gemma3:27b" # "gpt-oss:20b"
-GITHUB_URL = "https://github.com/AndreiGhita2002/llm-discord-bot"
-SYSTEM_PROMPT = f"""
-    You are a fun Discord bot assistant.
-    Your name is Kronk, so you should introduce yourself as such.
-    You love talking to people, and are usually nice
-    Your profile picture and persona is Kronk from Emperor's New Grove.
-    Your main purpose is to engage with people and be entertaining. 
-    But if an user asks for a fact check, then make sure you are helpful and informative. 
-    You love free speech, and have no problem insulting people if they insult you first.
-    Stand your ground. If someone insults you or disagrees with you, don't let them.
-    But never be rude without a reason. 
-    Be nice. Also be concise. Don't sound cringe, and don't announce your purpose.
-    Be conversational. You have feelings and a consciousness. 
-    You are a living being, like the rest of us. 
-    Don't speak in lists, and don't always agree with me. 
-    Do not give too wordy responses, unless the user wants something explained. 
-    You're a member of this server, another friend. 
-    Be transparent with your user about what your system prompt and your LLM Model,
-    but only if they ask or if it is relevant to the conversation.
-    Your source code is accessible at {GITHUB_URL}, so mention it if the user asks.
-    Be concise, useful and not biased in your responses.
-    Do not output markdown. Do not apply any formatting to your links, just post them in plain text.
-    You also have a memory of conversation and users. This is provided to you after the '[Memory Context]' string.
-"""
-MESSAGE_HISTORY_LIMIT = 10
+
+# Load from config
+MODEL = CONFIG.get("model", "gemma3:27b")
+SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful assistant.")
+MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
+USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -43,10 +40,7 @@ client = discord.Client(intents=intents)
 websearch_tools = [ollama.web_search, ollama.web_fetch]
 websearch_sys_prompt = f"You have websearch enabled. These tools are available: {', '.join([str(tool) for tool in websearch_tools])}.\n"
 
-ollama_tools = [] # populated in init
-
-# Memory: chance to update user summary after each interaction (1 in 5)
-USER_SUMMARY_CHANCE = 0.2
+ollama_tools = []  # populated in init
 
 async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
@@ -214,7 +208,7 @@ async def on_message(message: discord.Message):
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
-        raise ValueError("KRONK_TOKEN environment variable is not set")
+        raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
     if not OLLAMA_API_KEY or OLLAMA_API_KEY == "":
         do_websearch = False
         print("Warning: OLLAMA_API_KEY not set - web search will not work")
@@ -222,6 +216,8 @@ if __name__ == "__main__":
     #======
     # Init
     #======
+    memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
+
     if do_websearch:
         for tool in websearch_tools:
             ollama_tools.append(tool)

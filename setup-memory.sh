@@ -1,11 +1,11 @@
 #!/bin/bash
-# Setup script for Kronk's memory system
+# Setup script for bot memory system
 
 set -e
 
-MEMORY_DIR="./kronk_memory"
+MEMORY_DIR="./bot_memory"
 
-echo "Setting up Kronk memory system..."
+echo "Setting up bot memory system..."
 
 # Create memory directory
 mkdir -p "$MEMORY_DIR"
