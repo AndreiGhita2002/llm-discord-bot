@@ -30,19 +30,25 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
    uv sync
    ```
 
-3. **Set up Ollama**
+3. **Create your config file**
+   ```bash
+   cp kronk_config.yaml config.yaml
+   ```
+   Edit `config.yaml` to customize the bot's personality, model, and other settings. Your local config won't be overwritten by updates.
+
+4. **Set up Ollama**
 
    Install Ollama and pull the model:
    ```bash
    ollama pull gpt-oss:20b
    ```
 
-4. **Configure environment variables**
+5. **Configure environment variables**
    ```bash
    export DISCORD_BOT_TOKEN="your-discord-bot-token"
    ```
 
-5. **Run the bot**
+6. **Run the bot**
    ```bash
    uv run python main.py
    ```
@@ -77,6 +83,7 @@ Use the included script to set up the bot as a launchd daemon:
 ### v0.2.0
 
 - **Configuration file**: All bot settings now live in `config.yaml` (model, system prompt, message history, memory settings)
+- **User-local config**: `config.yaml` is gitignored; copy from `kronk_config.yaml` template. Your config won't be overwritten by updates.
 - **Bot-agnostic codebase**: Code no longer hardcodes "Kronk" - personality is fully configurable
 - **Renamed env var**: `KRONK_TOKEN` → `DISCORD_BOT_TOKEN` (old name still works for backward compatibility)
 - **Renamed memory directory**: `kronk_memory/` → `bot_memory/` (old directory still works for backward compatibility)

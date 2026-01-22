@@ -9,6 +9,12 @@ import memory
 
 def load_config(config_path: str = "config.yaml") -> dict:
     """Load configuration from YAML file."""
+    if not os.path.exists(config_path):
+        print(f"Error: {config_path} not found.")
+        print(f"Create your config by copying the template:")
+        print(f"  cp kronk_config.yaml {config_path}")
+        exit(1)
+
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 

@@ -14,7 +14,8 @@ When working on this project, keep the "Known Issues / TODOs" section below up t
 ## Project Structure
 
 - `main.py` - Main bot code
-- `config.yaml` - Bot configuration (model, system prompt, message history, tools)
+- `kronk_config.yaml` - Default config template (Kronk persona)
+- `config.yaml` - User's local config (gitignored, created by copying kronk_config.yaml)
 - `memory.py` - Lightweight memory system (user summaries + conversation recall)
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
@@ -76,6 +77,9 @@ The bot has a lightweight memory system (`memory.py`) that provides:
 ```bash
 # Install dependencies
 uv sync
+
+# Create your config (won't be overwritten by git updates)
+cp kronk_config.yaml config.yaml
 
 # Setup memory system (creates directory + pulls embedding model)
 ./setup-memory.sh
