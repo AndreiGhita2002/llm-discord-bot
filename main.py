@@ -1,5 +1,6 @@
 import os
 import random
+from datetime import datetime, timezone, timedelta
 import discord
 import ollama
 import yaml
@@ -36,8 +37,9 @@ do_websearch = CONFIG.get("web_search", False) and bool(OLLAMA_API_KEY)
 
 # Load from config
 MODEL = CONFIG.get("model", "gemma3:27b")
-SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful assistant.")
+SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful chatbot.")
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
+MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
 
 intents = discord.Intents.default()
@@ -54,17 +56,32 @@ do_user_memory = CONFIG.get("memory", {}).get("user_memory", False)
 do_conversation_memory = CONFIG.get("memory", {}).get("conversation_memory", False)
 max_stored_conversations = CONFIG.get("memory", {}).get("max_stored_conversations", 500)
 
+
+def process_message(msg: discord.Message, content_prefix: str="") -> dict[str, str]:
+    """Converts a discord message into the format provided to the model."""
+    return {
+        "role": "assistant" if msg.author == msg.channel.guild.me else "user",
+        "content": f"{msg.author.display_name}({msg.author.id}):{content_prefix} {msg.content}",
+    }
+
+
 async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSAGE_HISTORY_LIMIT) -> list[dict]:
     """Fetch the last N messages from the channel and convert to LLM message format."""
+    # Calculate age cutoff if configured
+    cutoff_time = None
+    if MESSAGE_MAX_AGE_MINUTES > 0:
+        cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=MESSAGE_MAX_AGE_MINUTES)
+
     messages = []
     async for msg in channel.history(limit=limit):
         if msg.author.bot and msg.author != channel.guild.me:
             continue  # Skip other bots, but include our own messages
         if not msg.content or not msg.content.strip():
             continue  # Skip empty messages (images, embeds, etc.)
-        role = "assistant" if msg.author == channel.guild.me else "user"
-        content = msg.content if role == "assistant" else f"{msg.author.display_name}: {msg.content}"
-        messages.append({"role": role, "content": content})
+        if cutoff_time and msg.created_at < cutoff_time:
+            continue  # Skip messages older than max age
+        messages.append(process_message(msg))
+    messages.reverse()
     return messages
 
 
@@ -116,6 +133,10 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
 
 @client.event
 async def on_ready():
+    global SYSTEM_PROMPT
+    # Replace Discord-specific placeholders now that we have bot info
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_display_name}}", client.user.display_name)
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_user_id}}", str(client.user.id))
     print(f"Logged in as {client.user}")
 
 
@@ -123,15 +144,15 @@ async def on_ready():
 async def on_message(message: discord.Message):
     # print(f"Message received: {message.content}")
 
+    if message.is_system():
+        return  # System message
     if message.author == client.user:
-        return
+        return  # Message from this bot
 
     # fetch the referenced message if it exists:
     ref_msg = None
     if message.reference and message.reference.message_id:
         ref_msg = await message.channel.fetch_message(message.reference.message_id)
-
-    # TODO: check that the message is not a system message, like a pin
 
     # Only respond if mentioned or is responding to its message
     is_mentioned = str(client.user.id) in message.content
@@ -139,35 +160,24 @@ async def on_message(message: discord.Message):
     if not is_mentioned and not is_reply:
         return
 
-    # Check if message is just a mention with no actual content
-    content_without_mention = message.content.replace(f"<@{client.user.id}>", "").strip()
-    if is_mentioned and not is_reply and not content_without_mention:
-        await message.reply("Hey! What's up? 🥒")
-        return
-
+    # Formulating a response:
     try:
         async with message.channel.typing():
             try:
-                # Fetch last 20 messages from this channel
+                # Fetch last messages from this channel
                 messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
-                messages.reverse()
 
                 # If replying to a message not in recent history, add it as context
                 if ref_msg is not None:
-                    role = "assistant" if ref_msg.author == client.user else "user"
-                    ref_content = ref_msg.content if role == "assistant" else f"{ref_msg.author.display_name}: {ref_msg.content}"
                     # Insert before the last message so model responds to the user
-                    messages.insert(-1, {
-                        "role": role,
-                        "content": f"[Referenced message] {ref_content}",
-                    })
+                    messages.insert(-1, process_message(message, content_prefix="[Referenced message]"))
 
                 # Build memory context for this user/channel
                 memory_context = None
                 if do_memory:
                     memory_context = memory.build_memory_context(
                         user_id=str(message.author.id),
-                        current_message=content_without_mention or message.content,
+                        current_message=message.content,
                         channel_id=str(message.channel.id),
                         do_user_memory=do_user_memory,
                         do_conversation_memory=do_conversation_memory,
@@ -239,12 +249,8 @@ if __name__ == "__main__":
     if do_memory:
         memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
 
-    if do_memory:
-        SYSTEM_PROMPT += "\nYou have a memory of conversations and users. This is provided to you after the '[Memory Context]' string."
-
     if do_websearch:
         for tool in websearch_tools:
             ollama_tools.append(tool)
-        SYSTEM_PROMPT += websearch_sys_prompt
 
     client.run(DISCORD_TOKEN)

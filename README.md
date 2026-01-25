@@ -111,6 +111,8 @@ Use the included script to set up the bot as a launchd daemon:
 - **Added PyYAML dependency** for config loading
 - **Granular memory controls**: New config options to toggle memory features independently (`do_memory`, `user_memory`, `conversation_memory`)
 - **Configurable conversation limit**: `max_stored_conversations` now read from config
+- **System prompt placeholders**: Use `{{discord_display_name}}`, `{{discord_user_id}}`, and `{{github_url}}` in your system prompt
+- **Message age filtering**: New `max_age_minutes` setting to ignore old messages from context
 
 ### v0.1.0
 

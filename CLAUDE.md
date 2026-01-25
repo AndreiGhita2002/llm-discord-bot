@@ -33,8 +33,13 @@ When updating the changelog in README.md:
 
 Configuration is loaded from `config.yaml`:
 - **Model**: Configurable in `config.yaml` (default: `gemma3:27b`)
-- **System prompt**: Customizable personality/behavior in `config.yaml`
-- **Message history**: Limit and settings in `config.yaml` (short-term memory)
+- **System prompt**: Customizable personality/behavior in `config.yaml`. Supports placeholders:
+  - `{{discord_display_name}}`: Bot's display name (replaced at runtime)
+  - `{{discord_user_id}}`: Bot's user ID (replaced at runtime)
+  - `{{github_url}}`: GitHub URL from config (replaced at load time)
+- **Message history**: Short-term memory settings in `config.yaml`:
+  - `limit`: Number of recent messages to fetch (default: 10)
+  - `max_age_minutes`: Ignore messages older than this (default: 60, set to 0 to disable)
 - **Memory settings**: Long-term memory with granular toggles:
   - `do_memory`: Master toggle for all memory features
   - `user_memory`: Toggle user-specific summaries
@@ -51,7 +56,7 @@ Environment variables:
 ## How It Works
 
 1. Bot responds when @mentioned or when someone replies to its message
-2. When triggered, fetches the last 20 messages from that channel via `channel.history()`
+2. When triggered, fetches recent messages from that channel (configurable limit and max age)
 3. Referenced messages are inserted *before* the user's current message in context (so model responds to user, not the reference)
 4. Uses `ollama.AsyncClient()` for async LLM calls
 
@@ -78,7 +83,7 @@ Both features can be independently toggled via config. The `do_memory` flag is a
 - Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text`
 - Data stored in `./bot_memory/` directory (configurable via `memory_dir` in config.yaml)
 - Backward compatible: falls back to `./kronk_memory/` if it exists
-- Keeps last 500 conversations max to prevent unbounded growth
+- Keeps last N conversations (configurable via `max_stored_conversations`, default 500) to prevent unbounded growth
 
 ## Known Issues / TODOs
 
