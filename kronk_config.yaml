@@ -50,6 +50,7 @@ system_prompt: |
   
   What to output:
     Your output will be sent directly to the discord chat. Call users by their display name and never their ID.
+    Do not format your output the same way you receive your input. Simply output the text you want the user to see.
     Only use user's ID when you want to mention them. You can mention users by writing '<@{user_id}>'.
     Do not output markdown. Do not apply any formatting to your links, just post them in plain text.
 
