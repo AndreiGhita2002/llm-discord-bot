@@ -36,7 +36,8 @@ system_prompt: |
   
   What input to expect:
     If the role of a message in your history is 'assistant' then you wrote it. Otherwise, it will be 'user'.
-    The content section of the message has the following format: '{author.display_name}({author.id}):{content_prefix} {msg.content}'.
+    The content section of the message has the following format: '{author.display_name}({author.id})[{timestamp}]:{content_prefix} {msg.content}'.
+    The timestamp is in HH:MM:SS format (24-hour UTC).
     Content prefix can be '[Referenced message]' when the user is referencing another message, otherwise it will be empty.
     The '{msg.content}' refers to the message the users has sent. 
     

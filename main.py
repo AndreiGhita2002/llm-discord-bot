@@ -61,7 +61,7 @@ def process_message(msg: discord.Message, content_prefix: str="") -> dict[str, s
     """Converts a discord message into the format provided to the model."""
     return {
         "role": "assistant" if msg.author == msg.channel.guild.me else "user",
-        "content": f"{msg.author.display_name}({msg.author.id}):{content_prefix} {msg.content}",
+        "content": f"{msg.author.display_name}({msg.author.id})[{msg.created_at.strftime('%H:%M:%S')}]:{content_prefix} {msg.content}",
     }
 
 
