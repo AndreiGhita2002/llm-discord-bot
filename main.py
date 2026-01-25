@@ -1,4 +1,5 @@
 import os
+import re
 import random
 from datetime import datetime, timezone, timedelta
 import discord
@@ -6,6 +7,20 @@ import ollama
 import yaml
 
 import memory
+
+
+def strip_message_prefix(response: str) -> str:
+    """Strip the input format prefix if the model mimics it in output.
+
+    Matches patterns like: 'Name(123456)[12:34:56]: ' at the start of the response.
+    Handles repeated prefixes by stripping until none remain.
+    """
+    #TODO: ideally we should get kronk to stop outputting these
+
+    pattern = r'^[^(]+\(\d+\)\[\d{2}:\d{2}:\d{2}\]:\s*'
+    while re.match(pattern, response):
+        response = re.sub(pattern, '', response)
+    return response
 
 
 def load_config(config_path: str = "config.yaml") -> dict:
@@ -227,6 +242,9 @@ async def on_message(message: discord.Message):
         print(f"[WARN] model generated empty response - user message: {message.content}")
         await message.reply("I'm not sure what to say to that. 🥒")
         return
+
+    # Strip input format prefix if model mimics it
+    response = strip_message_prefix(response)
 
     if len(response) <= 2000:
         await message.reply(response)
