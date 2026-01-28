@@ -176,69 +176,42 @@ async def on_message(message: discord.Message):
         return
 
     # Formulating a response:
-    try:
-        async with message.channel.typing():
-            try:
-                # Fetch last messages from this channel
-                messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
+    async with message.channel.typing():
+        # Fetch last messages from this channel
+        messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
 
-                # If replying to a message not in recent history, add it as context
-                if ref_msg is not None:
-                    # Insert before the last message so model responds to the user
-                    messages.insert(-1, process_message(message, content_prefix="[Referenced message]"))
+        # If replying to a message not in recent history, add it as context
+        if ref_msg is not None:
+            # Insert before the last message so model responds to the user
+            messages.insert(-1, process_message(message, content_prefix="[Referenced message]"))
 
-                # Build memory context for this user/channel
-                memory_context = None
-                if do_memory:
-                    memory_context = memory.build_memory_context(
-                        user_id=str(message.author.id),
-                        current_message=message.content,
-                        channel_id=str(message.channel.id),
-                        do_user_memory=do_user_memory,
-                        do_conversation_memory=do_conversation_memory,
-                    )
+        # Build memory context for this user/channel (must happen before query)
+        memory_context = None
+        if do_memory:
+            memory_context = memory.build_memory_context(
+                user_id=str(message.author.id),
+                current_message=message.content,
+                channel_id=str(message.channel.id),
+                do_user_memory=do_user_memory,
+                do_conversation_memory=do_conversation_memory,
+            )
 
-                response = await query_ollama(messages, memory_context=memory_context)
+        # Query the LLM
+        try:
+            response = await query_ollama(messages, memory_context=memory_context)
+        except TimeoutError:
+            await message.reply("The request timed out. Please try again. 🥒")
+            return
+        except ollama.ResponseError as e:
+            await message.reply(f"Error communicating with Ollama: {e} 🥒")
+            return
+        except Exception as e:
+            await message.reply(f"<Weird Error>  🥒")
+            print(f"<Weird Error> {e} 🥒")
+            return
 
-                # Store this conversation for future recall
-                if do_memory and do_conversation_memory:
-                    try:
-                        memory.store_conversation(
-                            channel_id=str(message.channel.id),
-                            messages=messages,
-                            max_conversations=max_stored_conversations
-                        )
-                    except Exception as mem_err:
-                        print(f"[WARN] Failed to store conversation: {mem_err}")
-
-                # Occasionally update user summary (async, don't block response)
-                if do_memory and do_user_memory:
-                    #TODO: we could use some basic language analysis to determine if the user said anything important
-                    if random.random() < USER_SUMMARY_CHANCE:
-                        try:
-                            await memory.generate_user_summary(
-                                user_id=str(message.author.id),
-                                user_name=message.author.display_name,
-                                recent_messages=messages,
-                                model=MODEL
-                            )
-                        except Exception as sum_err:
-                            print(f"[WARN] Failed to generate user summary: {sum_err}")
-
-            except TimeoutError:
-                await message.reply("The request timed out. Please try again. 🥒")
-                return
-            except ollama.ResponseError as e:
-                await message.reply(f"Error communicating with Ollama: {e} 🥒")
-                return
-
-    except Exception as e:
-        await message.reply(f"<Weird Error>  🥒")
-        print(f"<Weird Error> {e} 🥒")
-        return
-
-    # failsafe in case the response is empty
-    if response is None or len(response) == 0:
+    # Failsafe for empty response
+    if not response:
         print(f"[WARN] model generated empty response - user message: {message.content}")
         await message.reply("I'm not sure what to say to that. 🥒")
         return
@@ -246,6 +219,7 @@ async def on_message(message: discord.Message):
     # Strip input format prefix if model mimics it
     response = strip_message_prefix(response)
 
+    # Send the reply first
     if "<ignore>" not in response:
         if len(response) <= 2000:
             await message.reply(response)
@@ -253,6 +227,32 @@ async def on_message(message: discord.Message):
             chunks = [response[i : i + 2000] for i in range(0, len(response), 2000)]
             for chunk in chunks:
                 await message.reply(chunk)
+
+    # Process memory after responding (non-blocking for user experience)
+    if do_memory:
+        # Store this conversation for future recall
+        if do_conversation_memory:
+            try:
+                memory.store_conversation(
+                    channel_id=str(message.channel.id),
+                    messages=messages,
+                    max_conversations=max_stored_conversations
+                )
+            except Exception as mem_err:
+                print(f"[WARN] Failed to store conversation: {mem_err}")
+
+        # Occasionally update user summary
+        # TODO: we could use some basic language analysis to determine if the user said anything important
+        if do_user_memory and random.random() < USER_SUMMARY_CHANCE:
+            try:
+                await memory.generate_user_summary(
+                    user_id=str(message.author.id),
+                    user_name=message.author.display_name,
+                    recent_messages=messages,
+                    model=MODEL
+                )
+            except Exception as sum_err:
+                print(f"[WARN] Failed to generate user summary: {sum_err}")
 
 
 if __name__ == "__main__":
