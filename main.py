@@ -246,12 +246,13 @@ async def on_message(message: discord.Message):
     # Strip input format prefix if model mimics it
     response = strip_message_prefix(response)
 
-    if len(response) <= 2000:
-        await message.reply(response)
-    else:
-        chunks = [response[i : i + 2000] for i in range(0, len(response), 2000)]
-        for chunk in chunks:
-            await message.reply(chunk)
+    if "<ignore>" not in response:
+        if len(response) <= 2000:
+            await message.reply(response)
+        else:
+            chunks = [response[i : i + 2000] for i in range(0, len(response), 2000)]
+            for chunk in chunks:
+                await message.reply(chunk)
 
 
 if __name__ == "__main__":
