@@ -23,16 +23,39 @@ def strip_message_prefix(response: str) -> str:
     return response
 
 
-def load_config(config_path: str = "config.yaml") -> dict:
-    """Load configuration from YAML file."""
-    if not os.path.exists(config_path):
-        print(f"Error: {config_path} not found.")
-        print(f"Create your config by copying the template:")
-        print(f"  cp kronk_config.yaml {config_path}")
+def deep_merge(base: dict, override: dict) -> dict:
+    """Deep merge override into base. Override values take precedence."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def load_config(config_path: str = "config.yaml", default_path: str = "kronk_config.yaml") -> dict:
+    """Load configuration with fallback to defaults.
+
+    Loads kronk_config.yaml as the base, then deep-merges config.yaml on top.
+    This allows config.yaml to only specify fields that differ from defaults.
+    """
+    # Load default config (required)
+    if not os.path.exists(default_path):
+        print(f"Error: {default_path} not found.")
         exit(1)
 
-    with open(config_path, "r") as f:
+    with open(default_path, "r") as f:
         config = yaml.safe_load(f)
+
+    # Merge user config on top if it exists
+    if os.path.exists(config_path):
+        with open(config_path, "r") as f:
+            user_config = yaml.safe_load(f) or {}
+        config = deep_merge(config, user_config)
+        print(f"Loaded config from {config_path} (with {default_path} defaults)")
+    else:
+        print(f"No {config_path} found, using defaults from {default_path}")
 
     # Template substitution for system prompt
     system_prompt = config.get("system_prompt", "")

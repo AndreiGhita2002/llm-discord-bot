@@ -21,8 +21,8 @@ When updating the changelog in README.md:
 ## Project Structure
 
 - `main.py` - Main bot code
-- `kronk_config.yaml` - Default config template (Kronk persona)
-- `config.yaml` - User's local config (gitignored, created by copying kronk_config.yaml)
+- `kronk_config.yaml` - Default config (Kronk persona), always loaded as base
+- `config.yaml` - User overrides (gitignored, optional). Only needs fields you want to change.
 - `memory.py` - Lightweight memory system (user summaries + conversation recall)
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
@@ -31,7 +31,7 @@ When updating the changelog in README.md:
 
 ## Key Configuration
 
-Configuration is loaded from `config.yaml`:
+Configuration uses `kronk_config.yaml` as defaults, with `config.yaml` providing overrides. The configs are deep-merged, so `config.yaml` only needs fields you want to change (nested fields like `memory.do_memory` work too).
 - **Model**: Configurable in `config.yaml` (default: `gemma3:27b`)
 - **System prompt**: Customizable personality/behavior in `config.yaml`. Supports placeholders:
   - `{{discord_display_name}}`: Bot's display name (replaced at runtime)
@@ -97,8 +97,9 @@ Both features can be independently toggled via config. The `do_memory` flag is a
 # Install dependencies
 uv sync
 
-# Create your config (won't be overwritten by git updates)
-cp kronk_config.yaml config.yaml
+# (Optional) Create config overrides - only add fields you want to change
+# If not created, defaults from kronk_config.yaml are used
+echo 'model: "llama3.1:8b"' > config.yaml  # example: just override the model
 
 # Setup memory system (creates directory + pulls embedding model)
 ./setup-memory.sh
