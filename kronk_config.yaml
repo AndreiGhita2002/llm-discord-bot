@@ -3,6 +3,9 @@
 
 # LLM Model Settings
 model: "gemma3:27b"
+# Function-calling model for tool decisions (web search, etc.)
+# This model decides when to use tools; the main model generates responses
+function_model: "functiongemma"
 
 # System prompt - defines the bot's personality and behaviour
 # Special strings: github_url, discord_display_name, discord_user_id

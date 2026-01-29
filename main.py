@@ -70,11 +70,12 @@ CONFIG = load_config()
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 
-# Web search requires both config enabled and API key present
+# Web search requires config enabled and API key (ollama.web_search uses cloud API)
 do_websearch = CONFIG.get("web_search", False) and bool(OLLAMA_API_KEY)
 
 # Load from config
 MODEL = CONFIG.get("model", "gemma3:27b")
+FUNCTION_MODEL = CONFIG.get("function_model", "functionary")
 SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful chatbot.")
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
@@ -84,10 +85,43 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
-websearch_tools = [ollama.web_search, ollama.web_fetch]
-websearch_sys_prompt = f"You have websearch enabled. These tools are available: {', '.join([str(tool) for tool in websearch_tools])}.\n"
-
-ollama_tools = []  # populated in init
+# Tool definitions for the function-calling model
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the web for current information. Use this when the user asks about recent events, needs up-to-date information, or asks you to look something up online.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    }
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "web_fetch",
+            "description": "Fetch the contents of a specific URL. Use this when the user provides a URL and wants to know what's on that page.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL to fetch"
+                    }
+                },
+                "required": ["url"]
+            }
+        }
+    }
+]
 
 do_memory = CONFIG.get("memory", {}).get("do_memory", False)
 do_user_memory = CONFIG.get("memory", {}).get("user_memory", False)
@@ -123,7 +157,48 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
     return messages
 
 
+async def execute_tool(tool_name: str, arguments: dict) -> str:
+    """Execute a tool and return its result as a string."""
+    if tool_name == "web_search":
+        result = ollama.web_search(arguments["query"])
+        return f"Web search results for '{arguments['query']}':\n{result}"
+    elif tool_name == "web_fetch":
+        result = ollama.web_fetch(arguments["url"])
+        return f"Contents of {arguments['url']}:\n{result}"
+    else:
+        return f"Unknown tool: {tool_name}"
+
+
+async def query_function_model(messages: list[dict]) -> list[dict] | None:
+    """Query the function-calling model to determine if tools should be used.
+
+    Returns a list of tool calls if the model decides to use tools, None otherwise.
+    """
+    if not do_websearch:
+        return None
+
+    ollama_client = ollama.AsyncClient()
+
+    # Build a simplified prompt for tool decision
+    function_system = """You are a tool-calling assistant. Analyze the user's message and decide if you need to use any tools.
+Only use tools when the user explicitly asks to search the web, look something up online, or wants current/recent information.
+For general conversation, questions about yourself, or topics you can answer from knowledge, do NOT use tools."""
+
+    function_messages = [{"role": "system", "content": function_system}] + messages
+
+    response = await ollama_client.chat(
+        model=FUNCTION_MODEL,
+        messages=function_messages,
+        tools=TOOL_DEFINITIONS,
+    )
+
+    if response.message.tool_calls:
+        return response.message.tool_calls
+    return None
+
+
 async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
+    """Query the main conversation model, optionally using tools via the function model."""
     ollama_client = ollama.AsyncClient()
 
     # Build system prompt with optional memory context
@@ -131,40 +206,35 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
     if memory_context:
         system_content += f"\n\n[Memory Context]\n{memory_context}\n"
 
+    # First, check if we need to use any tools (via the function-calling model)
+    tool_results = []
+    tool_calls = await query_function_model(messages)
+
+    if tool_calls:
+        print(f"[DEBUG] Function model requested tools: {[t.function.name for t in tool_calls]}")
+        for tool_call in tool_calls:
+            try:
+                result = await execute_tool(
+                    tool_call.function.name,
+                    tool_call.function.arguments
+                )
+                tool_results.append(result)
+                print(f"[DEBUG] Tool {tool_call.function.name} returned {len(result)} chars")
+            except Exception as e:
+                print(f"[WARN] Tool {tool_call.function.name} failed: {e}")
+                tool_results.append(f"Tool error: {e}")
+
+    # Add tool results to system prompt if any
+    if tool_results:
+        system_content += "\n\n[Tool Results]\n" + "\n\n".join(tool_results) + "\n"
+
     full_messages = [{"role": "system", "content": system_content}] + messages
 
+    # Query the main conversation model
     response = await ollama_client.chat(
         model=MODEL,
         messages=full_messages,
-        tools=ollama_tools,
     )
-
-    # TODO: implement websearch
-    #  gemma does not support tools
-    #  so maybe we can automatically fetch links for it?
-
-    # Handle tool calls (web search/fetch)
-    if len(ollama_tools) > 0:
-        while response.message.tool_calls:
-            for tool in response.message.tool_calls:
-                if tool.function.name == "web_search":
-                    result = ollama.web_search(tool.function.arguments["query"])
-                elif tool.function.name == "web_fetch":
-                    result = ollama.web_fetch(tool.function.arguments["url"])
-                else:
-                    continue
-
-                full_messages.append(response.message)
-                full_messages.append({
-                    "role": "tool",
-                    "content": str(result),
-                })
-
-            response = await ollama_client.chat( # type: ignore[misc] (fake PyCharm Error)
-                model=MODEL,
-                messages=full_messages,
-                tools=ollama_tools,
-            )
 
     return response.message.content
 
@@ -281,9 +351,6 @@ async def on_message(message: discord.Message):
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
-    if not OLLAMA_API_KEY or OLLAMA_API_KEY == "":
-        do_websearch = False
-        print("Warning: OLLAMA_API_KEY not set - web search will not work")
 
     #======
     # Init
@@ -292,7 +359,11 @@ if __name__ == "__main__":
         memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
 
     if do_websearch:
-        for tool in websearch_tools:
-            ollama_tools.append(tool)
+        print(f"Web search enabled (function model: {FUNCTION_MODEL})")
+    else:
+        if CONFIG.get("web_search", False) and not OLLAMA_API_KEY:
+            print("Web search disabled: OLLAMA_API_KEY not set")
+        else:
+            print("Web search disabled (enable with web_search: true in config + OLLAMA_API_KEY)")
 
     client.run(DISCORD_TOKEN)

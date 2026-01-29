@@ -41,7 +41,7 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 
    Install Ollama and pull the model:
    ```bash
-   ollama pull gpt-oss:20b
+   ollama pull gemma3:27b
    ```
 
 5. **Configure environment variables**
@@ -56,15 +56,27 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 
 ## Web Search (Optional)
 
-The bot can search the web for current information. This feature uses Ollama's cloud API.
+The bot can search the web for current information using a **two-model architecture**:
+1. A **function-calling model** (e.g., `functiongemma`) decides when to search
+2. The **main model** (e.g., `gemma3:27b`) generates the response with search results
 
-1. Get a free API key from https://ollama.com/settings/keys
-2. Set the environment variable:
+This lets you use conversation models that don't natively support tools.
+
+**Setup**:
+1. Pull the function-calling model:
+   ```bash
+   ollama pull functiongemma
+   ```
+2. Get a free API key from https://ollama.com/settings/keys (the search itself uses Ollama's cloud)
+3. Set the environment variable:
    ```bash
    export OLLAMA_API_KEY="your-api-key"
    ```
-
-Web search is automatically enabled when the API key is present and `web_search: true` in config.
+4. Enable in config:
+   ```yaml
+   web_search: true
+   function_model: "functiongemma"  # or another function-calling model
+   ```
 
 ## Memory System
 
@@ -100,6 +112,11 @@ Use the included script to set up the bot as a launchd daemon:
 - **Reply** to any of the bot's messages to continue the conversation
 
 ## Changelog
+
+### v0.2.1
+
+- **Two-model web search**: New architecture using a function-calling model (e.g., `functiongemma`) to decide when to search, while the main model handles conversation. This enables web search with models that don't support tools natively.
+- **New config option**: `function_model` to specify which model handles tool decisions
 
 ### v0.2.0
 

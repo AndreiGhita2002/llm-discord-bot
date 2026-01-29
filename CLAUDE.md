@@ -50,8 +50,7 @@ Configuration uses `kronk_config.yaml` as defaults, with `config.yaml` providing
 
 Environment variables:
 - **Discord token**: `DISCORD_BOT_TOKEN` env var (falls back to `KRONK_TOKEN` for backward compatibility)
-- **Ollama API key**: `OLLAMA_API_KEY` env var (only needed for web search)
-- **Web search**: Only enabled if `OLLAMA_API_KEY` is found
+- **Ollama API key**: `OLLAMA_API_KEY` env var (needed for web search - the search itself uses Ollama's cloud)
 
 ## How It Works
 
@@ -62,12 +61,16 @@ Environment variables:
 
 ## Web Search Feature
 
-Web search uses Ollama's cloud API (not local), so it requires:
-- An API key from https://ollama.com/settings/keys
-- `OLLAMA_API_KEY` environment variable set
-- A model that supports tool calling (llama3.1+, qwen3, etc.)
+Web search uses a **two-model architecture** to work with models that don't support tool calling:
+1. **Function model** (e.g., `functionary`): Decides if/which tools to call based on the user's message
+2. **Main model** (e.g., `gemma3:27b`): Generates the conversational response with tool results injected into context
 
-Automatically enabled when `OLLAMA_API_KEY` is set.
+This approach keeps the personality model (gemma3) for all user-facing responses while using a specialized model for tool decisions.
+
+**Requirements**:
+- `function_model` in config (default: `functionary`) - pull with `ollama pull functionary`
+- `web_search: true` in config
+- `OLLAMA_API_KEY` env var (the actual web search/fetch uses Ollama's cloud API)
 
 ## Memory System
 
@@ -87,7 +90,7 @@ Both features can be independently toggled via config. The `do_memory` flag is a
 
 ## Known Issues / TODOs
 
-[ ] Websearch not working.
+[ ] Websearch: implemented two-model architecture, needs testing.
 [ ] Log channel feature: the user can set a channel for bot logs, and the bot will announce when it's turning on or off.
 [ ] Implement configurable tools system in config.yaml.
 
