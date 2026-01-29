@@ -277,6 +277,18 @@ async def on_ready():
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_user_id}}", str(client.user.id))
     print(f"Logged in as {client.user}")
 
+    # Set bot status based on enabled features
+    status_parts = []
+    if do_memory:
+        status_parts.append("Kronk remembers")
+    if do_websearch:
+        status_parts.append("Web search on")
+
+    if status_parts:
+        status_text = " | ".join(status_parts)
+        await client.change_presence(activity=discord.Game(name=status_text))
+        print(f"Status set: {status_text}")
+
 
 @client.event
 async def on_message(message: discord.Message):
