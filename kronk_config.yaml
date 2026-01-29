@@ -80,7 +80,7 @@ message_history:
 memory:
   # One place toggle for all memory related settings.
   # If this is false then all other settings in this category will be ignored
-  do_memory: true
+  do_memory: false
 
   # Should the bot have specific memories about users?
   user_memory: true

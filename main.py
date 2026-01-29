@@ -1,6 +1,8 @@
 import os
 import re
 import random
+import time
+from collections.abc import Sequence
 from datetime import datetime, timezone, timedelta
 import discord
 import ollama
@@ -91,7 +93,9 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Search the web for current information. Use this when the user asks about recent events, needs up-to-date information, or asks you to look something up online.",
+            "description": "Search the web for current information. Use this when the user asks about recent events, "
+                           "needs up-to-date information, or asks you to look something up online."
+                           "Only use this when necessary, as this operation is very intensive",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -108,13 +112,14 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": "Fetch the contents of a specific URL. Use this when the user provides a URL and wants to know what's on that page.",
+            "description": "Fetch the contents of a web page. Only use when the user explicitly provides an HTTP/HTTPS "
+                           "URL (like https://example.com). Do NOT use for Discord IDs, numbers, or non-URL strings.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {
                         "type": "string",
-                        "description": "The URL to fetch"
+                        "description": "A full HTTP/HTTPS URL."
                     }
                 },
                 "required": ["url"]
@@ -160,16 +165,23 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
 async def execute_tool(tool_name: str, arguments: dict) -> str:
     """Execute a tool and return its result as a string."""
     if tool_name == "web_search":
+        print(f"[TOOL] web_search: {arguments['query']}")
         result = ollama.web_search(arguments["query"])
         return f"Web search results for '{arguments['query']}':\n{result}"
     elif tool_name == "web_fetch":
-        result = ollama.web_fetch(arguments["url"])
-        return f"Contents of {arguments['url']}:\n{result}"
+        url = arguments["url"]
+        # Validate URL before fetching
+        if not url.startswith(("http://", "https://")):
+            print(f"[TOOL] web_fetch: invalid URL '{url}' (skipped)")
+            return f"Invalid URL: {url} (must start with http:// or https://)"
+        print(f"[TOOL] web_fetch: {url}")
+        result = ollama.web_fetch(url)
+        return f"Contents of {url}:\n{result}"
     else:
         return f"Unknown tool: {tool_name}"
 
 
-async def query_function_model(messages: list[dict]) -> list[dict] | None:
+async def query_function_model(messages: list[dict]) -> Sequence[dict] | None:
     """Query the function-calling model to determine if tools should be used.
 
     Returns a list of tool calls if the model decides to use tools, None otherwise.
@@ -180,17 +192,24 @@ async def query_function_model(messages: list[dict]) -> list[dict] | None:
     ollama_client = ollama.AsyncClient()
 
     # Build a simplified prompt for tool decision
-    function_system = """You are a tool-calling assistant. Analyze the user's message and decide if you need to use any tools.
-Only use tools when the user explicitly asks to search the web, look something up online, or wants current/recent information.
-For general conversation, questions about yourself, or topics you can answer from knowledge, do NOT use tools."""
+    function_system = """You decide whether to use tools based on the user's MOST RECENT message.
+
+RULES:
+- web_search: ONLY use if the user explicitly asks to "search", "look up", or "find" something online.
+- web_fetch: ONLY use if the user's message contains an actual URL (starting with http:// or https://). NEVER invent URLs.
+- If unsure, do NOT use any tools.
+- Most messages need NO tools - only use them when clearly requested."""
 
     function_messages = [{"role": "system", "content": function_system}] + messages
 
+    start_time = time.time()
     response = await ollama_client.chat(
         model=FUNCTION_MODEL,
         messages=function_messages,
         tools=TOOL_DEFINITIONS,
     )
+    elapsed = time.time() - start_time
+    print(f"[TIMING] Function model ({FUNCTION_MODEL}): {elapsed:.2f}s")
 
     if response.message.tool_calls:
         return response.message.tool_calls
@@ -212,7 +231,15 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
 
     if tool_calls:
         print(f"[DEBUG] Function model requested tools: {[t.function.name for t in tool_calls]}")
+        seen_calls = set()  # Deduplicate tool calls
         for tool_call in tool_calls:
+            # Create a key for deduplication
+            call_key = (tool_call.function.name, str(tool_call.function.arguments))
+            if call_key in seen_calls:
+                print(f"[DEBUG] Skipping duplicate: {tool_call.function.name}")
+                continue
+            seen_calls.add(call_key)
+
             try:
                 result = await execute_tool(
                     tool_call.function.name,
@@ -231,10 +258,13 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
     full_messages = [{"role": "system", "content": system_content}] + messages
 
     # Query the main conversation model
+    start_time = time.time()
     response = await ollama_client.chat(
         model=MODEL,
         messages=full_messages,
     )
+    elapsed = time.time() - start_time
+    print(f"[TIMING] Main model ({MODEL}): {elapsed:.2f}s")
 
     return response.message.content
 
@@ -269,6 +299,7 @@ async def on_message(message: discord.Message):
         return
 
     # Formulating a response:
+    overall_start = time.time()
     async with message.channel.typing():
         # Fetch last messages from this channel
         messages = await fetch_channel_history(message.channel, limit=MESSAGE_HISTORY_LIMIT)
@@ -320,6 +351,9 @@ async def on_message(message: discord.Message):
             chunks = [response[i : i + 2000] for i in range(0, len(response), 2000)]
             for chunk in chunks:
                 await message.reply(chunk)
+
+    overall_elapsed = time.time() - overall_start
+    print(f"[TIMING] Overall response: {overall_elapsed:.2f}s")
 
     # Process memory after responding (non-blocking for user experience)
     if do_memory:
