@@ -278,11 +278,12 @@ async def on_ready():
     print(f"Logged in as {client.user}")
 
     # Set bot status based on enabled features
+    status_config = CONFIG.get("status", {})
     status_parts = []
     if do_memory:
-        status_parts.append("Kronk remembers")
+        status_parts.append(status_config.get("memory_enabled", "Memory on"))
     if do_websearch:
-        status_parts.append("Web search on")
+        status_parts.append(status_config.get("websearch_enabled", "Web search on"))
 
     if status_parts:
         status_text = " | ".join(status_parts)

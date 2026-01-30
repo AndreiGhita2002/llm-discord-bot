@@ -101,6 +101,11 @@ memory_dir: "./bot_memory"
 # Web search (requires OLLAMA_API_KEY env var)
 web_search: false
 
+# Bot status strings (shown as "Playing <text>")
+status:
+  memory_enabled: "Kronk remembers"
+  websearch_enabled: "Web search on"
+
 # Tools configuration
 # TODO: Implement tool system
 # tools:
