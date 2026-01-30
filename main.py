@@ -87,6 +87,10 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = discord.Client(intents=intents)
 
+# Track recently processed messages to prevent double-replies
+_processed_messages: set[int] = set()
+_processed_messages_max = 10
+
 # Tool definitions for the function-calling model
 TOOL_DEFINITIONS = [
     {
@@ -293,12 +297,23 @@ async def on_ready():
 
 @client.event
 async def on_message(message: discord.Message):
-    # print(f"Message received: {message.content}")
+    global _processed_messages
 
     if message.is_system():
         return  # System message
     if message.author == client.user:
         return  # Message from this bot
+
+    # Deduplicate: skip if we've already processed this message
+    if message.id in _processed_messages:
+        print(f"[WARN] Duplicate message event detected (id={message.id}), skipping")
+        return
+    _processed_messages.add(message.id)
+    # Keep set bounded
+    if len(_processed_messages) > _processed_messages_max:
+        # Remove oldest entries (set is unordered, but message IDs are snowflakes so roughly ordered)
+        oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
+        _processed_messages -= set(oldest)
 
     # fetch the referenced message if it exists:
     ref_msg = None
