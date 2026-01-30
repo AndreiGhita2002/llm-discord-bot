@@ -1,9 +1,6 @@
-import atexit
 import os
 import re
 import random
-import signal
-import sys
 import time
 from collections.abc import Sequence
 from datetime import datetime, timezone, timedelta
@@ -12,45 +9,6 @@ import ollama
 import yaml
 
 import memory
-
-# PID file in bot directory (same location as daemon's run-bot.sh uses)
-BOT_DIR = os.path.dirname(os.path.abspath(__file__))
-PID_FILE = os.path.join(BOT_DIR, "bot.pid")
-
-
-def check_existing_instance():
-    """Check if another instance is already running. Exit if so."""
-    if os.path.exists(PID_FILE):
-        with open(PID_FILE, "r") as f:
-            try:
-                old_pid = int(f.read().strip())
-                # Check if process is still running
-                os.kill(old_pid, 0)  # Signal 0 = check existence
-                print(f"ERROR: Another instance is already running (PID {old_pid})")
-                print(f"If this is incorrect, delete {PID_FILE} and try again")
-                sys.exit(1)
-            except (ValueError, ProcessLookupError, PermissionError):
-                # PID file exists but process is dead, clean up
-                pass
-
-    # Write our PID
-    with open(PID_FILE, "w") as f:
-        f.write(str(os.getpid()))
-
-
-def cleanup_pid_file():
-    """Remove PID file on exit."""
-    try:
-        if os.path.exists(PID_FILE):
-            os.remove(PID_FILE)
-    except Exception:
-        pass
-
-
-def signal_handler(*args):
-    """Handle termination signals."""
-    cleanup_pid_file()
-    sys.exit(0)
 
 
 def strip_message_prefix(response: str) -> str:
@@ -459,11 +417,6 @@ if __name__ == "__main__":
     #======
     # Init
     #======
-    check_existing_instance()
-    atexit.register(cleanup_pid_file)
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
     if do_memory:
         memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
 

@@ -40,7 +40,3 @@ build/
 # Bot memory (user data, conversation history)
 bot_memory/
 kronk_memory/
-
-# Runtime files
-bot.pid
-logs/
