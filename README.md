@@ -106,12 +106,58 @@ Use the included script to set up the bot as a launchd daemon:
 ./setup-daemon-mac.sh
 ```
 
+## Docker Deployment
+
+Deploy the bot in a Docker container with SSH access for collaborators who can edit code, restart the bot, and view logs.
+
+**Prerequisites**: Docker, Ollama running on the host.
+
+1. **Add collaborator SSH keys**
+   ```bash
+   echo "ssh-ed25519 AAAA... user@host" >> docker/authorized_keys
+   ```
+
+2. **Set environment variables** (or create a `.env` file)
+   ```bash
+   export DISCORD_BOT_TOKEN="your-discord-bot-token"
+   export OLLAMA_API_KEY="your-api-key"  # optional, for web search
+   ```
+
+3. **Copy existing config/memory** (if you have them)
+   ```bash
+   cp /path/to/config.yaml .
+   cp -r /path/to/bot_memory/ ./bot_memory/
+   ```
+
+4. **Build and run**
+   ```bash
+   docker compose up -d
+   ```
+
+The container connects to Ollama on the host automatically. The project directory is bind-mounted, so file edits persist.
+
+**Collaborator workflow**:
+```bash
+ssh -p 2222 botuser@<host-ip>
+botctl status              # check bot
+botctl attach              # live output (Ctrl+B, D to detach)
+vim main.py                # edit code
+botctl restart             # apply changes
+git pull && botctl restart # pull updates
+```
+
 ## Usage
 
 - **@mention** the bot to get a response
 - **Reply** to any of the bot's messages to continue the conversation
 
 ## Changelog
+
+### v0.2.2
+
+- **Docker deployment**: Added Dockerfile, docker-compose.yml, and support scripts for containerized deployment with SSH access for collaborators
+- **`botctl` command**: Management script for starting, stopping, restarting, and attaching to the bot process via tmux
+- **Auto-restart**: Monitor loop in entrypoint restarts the bot if it crashes; `restart: unless-stopped` handles container-level restarts
 
 ### v0.2.1
 

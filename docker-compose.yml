@@ -1,0 +1,21 @@
+services:
+  discord-bot:
+    build: .
+    container_name: discord-bot
+    restart: unless-stopped
+    environment:
+      - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
+      - OLLAMA_HOST=http://host.docker.internal:11434
+      - UV_PROJECT_ENVIRONMENT=/opt/bot-venv
+    volumes:
+      - .:/app                                                          # project code
+      - ./docker/authorized_keys:/home/botuser/.ssh/authorized_keys:ro  # SSH keys
+      - ssh_host_keys:/etc/ssh/ssh_host_keys                            # persist host keys
+    ports:
+      - "2222:22"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  ssh_host_keys:

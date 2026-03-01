@@ -28,6 +28,9 @@ When updating the changelog in README.md:
 - `setup-daemon-mac.sh` - macOS daemon setup script
 - `setup-memory.sh` - Initializes memory directory and pulls embedding model
 - `bot_memory/` - Created by setup script, stores user summaries and conversation embeddings (gitignored)
+- `Dockerfile` - Container image for Docker deployment
+- `docker-compose.yml` - Docker Compose service definition
+- `docker/` - Docker support files (entrypoint, botctl, authorized_keys)
 
 ## Key Configuration
 
@@ -87,6 +90,54 @@ Both features can be independently toggled via config. The `do_memory` flag is a
 - Data stored in `./bot_memory/` directory (configurable via `memory_dir` in config.yaml)
 - Backward compatible: falls back to `./kronk_memory/` if it exists
 - Keeps last N conversations (configurable via `max_stored_conversations`, default 500) to prevent unbounded growth
+
+## Docker Deployment
+
+The bot can be deployed in a Docker container with SSH access for collaborators.
+
+### Architecture
+- Single container: sshd + bot in tmux, managed by `botctl`
+- Bind-mounted project dir at `/app` - collaborators can edit code, git pull, etc.
+- Connects to Ollama on the host via `OLLAMA_HOST=http://host.docker.internal:11434`
+- `UV_PROJECT_ENVIRONMENT=/opt/bot-venv` avoids conflict with host's `.venv`
+- `restart: unless-stopped` for auto-restart
+
+### Files
+- `Dockerfile` - Container image definition
+- `docker-compose.yml` - Service configuration
+- `docker/entrypoint.sh` - Container startup (sshd + bot + monitor loop)
+- `docker/botctl.sh` - Bot management script (installed to `/usr/local/bin/botctl`)
+- `docker/authorized_keys` - SSH public keys for collaborators (gitignored)
+
+### Quick Start
+```bash
+# Add collaborator SSH keys
+echo "ssh-ed25519 AAAA... user@host" >> docker/authorized_keys
+
+# Copy existing config/memory if you have them
+cp /path/to/config.yaml .
+cp -r /path/to/bot_memory/ ./bot_memory/
+
+# Set env vars (or use .env file)
+export DISCORD_BOT_TOKEN="..."
+
+# Build and run
+docker compose up -d
+
+# SSH in
+ssh -p 2222 botuser@localhost
+botctl status
+```
+
+**Note**: The project dir is bind-mounted at `/app`, so `config.yaml` and `bot_memory/` just need to exist in the project root on the host. No `docker cp` needed.
+
+### Collaborator Commands
+```bash
+botctl start|stop|restart  # manage bot
+botctl status              # check if running
+botctl attach              # view live output (Ctrl+B, D to detach)
+botctl logs                # show recent output
+```
 
 ## Known Issues / TODOs
 

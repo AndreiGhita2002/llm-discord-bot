@@ -40,3 +40,6 @@ build/
 # Bot memory (user data, conversation history)
 bot_memory/
 kronk_memory/
+
+# Docker
+docker/authorized_keys
