@@ -7,16 +7,11 @@ MEMORY_DIR="./bot_memory"
 
 echo "Setting up bot memory system..."
 
-# Create memory directory
+# Create memory directory (the SQLite store `memory.db` is created automatically on first run)
 mkdir -p "$MEMORY_DIR"
 
-# Create empty JSON files
-echo "{}" > "$MEMORY_DIR/user_summaries.json"
-echo "[]" > "$MEMORY_DIR/conversations.json"
-
 echo "Created memory directory: $MEMORY_DIR"
-echo "  - user_summaries.json"
-echo "  - conversations.json"
+echo "  - memory.db will be created here on first run (SQLite + sqlite-vec)"
 
 # Check if embedding model is available
 if command -v ollama &> /dev/null; then

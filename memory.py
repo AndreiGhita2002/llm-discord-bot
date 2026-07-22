@@ -1,38 +1,90 @@
 """
-Lightweight memory system for Discord bots using Ollama embeddings for semantic search
-and LLM-generated user summaries.
+Lightweight memory system for Discord bots.
 
-Uses Ollama's embedding API + simple JSON storage - no heavy dependencies.
+Backed by SQLite + the sqlite-vec extension for efficient on-disk vector search:
+  - embeddings are stored as packed float32 blobs (not JSON text) and indexed for KNN
+  - conversation/summary text is stored zlib-compressed (smaller + not plaintext on disk)
+
+This is far more space/CPU efficient than the old load-whole-JSON-and-scan approach, and the
+binary .db file isn't casually human-readable. The public API is unchanged, so main.py/tools.py
+don't need to care about the storage layer.
+
+Needs the `nomic-embed-text` embedding model in Ollama and the `sqlite-vec` package.
 """
 
-import json
 import hashlib
-from pathlib import Path
+import sqlite3
+import struct
+import threading
+import zlib
 from datetime import datetime
+from pathlib import Path
 
 import ollama
+import sqlite_vec
 
 # === Storage Setup ===
 
 MEMORY_DIR: Path = None
-USER_SUMMARIES_FILE: Path = None
-CONVERSATIONS_FILE: Path = None
+DB_PATH: Path = None
 
 EMBEDDING_MODEL = "nomic-embed-text"  # Small, fast embedding model
+EMBEDDING_DIM = 768                   # nomic-embed-text output dimension
+
+# Retrieval threshold: keep hits whose cosine similarity > 0.3, i.e. cosine distance < 0.7.
+_MAX_COSINE_DISTANCE = 0.7
+
+_conn: sqlite3.Connection = None
+_lock = threading.Lock()  # serialize DB access (recall runs in a worker thread)
+
+
+def _connect(path: Path) -> sqlite3.Connection:
+    """Open a SQLite connection with the sqlite-vec extension loaded."""
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    return conn
+
+
+def _init_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_summaries (
+               user_id    TEXT PRIMARY KEY,
+               summary    BLOB,   -- zlib-compressed utf-8
+               updated_at TEXT
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS conversations (
+               id            INTEGER PRIMARY KEY AUTOINCREMENT,
+               conv_id       TEXT,
+               channel_id    TEXT,
+               timestamp     TEXT,
+               message_count INTEGER,
+               document      BLOB   -- zlib-compressed utf-8
+           )"""
+    )
+    conn.execute(
+        f"""CREATE VIRTUAL TABLE IF NOT EXISTS conversations_vec USING vec0(
+                embedding float[{EMBEDDING_DIM}] distance_metric=cosine
+            )"""
+    )
+    conn.commit()
 
 
 def init_memory(memory_dir: str = "./bot_memory"):
-    """Initialize memory system with the specified directory.
+    """Initialize the memory store (SQLite DB inside memory_dir).
 
-    Falls back to legacy 'kronk_memory/' directory if it exists and the
-    configured directory does not, for backward compatibility.
+    Falls back to the legacy 'kronk_memory/' directory if it exists and the configured one
+    doesn't, for backward compatibility with the directory location (data itself starts fresh
+    in memory.db; any old *.json files are left untouched).
     """
-    global MEMORY_DIR, USER_SUMMARIES_FILE, CONVERSATIONS_FILE
+    global MEMORY_DIR, DB_PATH, _conn
 
     configured_path = Path(memory_dir)
     legacy_path = Path("./kronk_memory")
 
-    # Use legacy directory if it exists and configured one doesn't
     if not configured_path.exists() and legacy_path.exists():
         MEMORY_DIR = legacy_path
         print(f"[memory] Using legacy directory: {legacy_path}")
@@ -40,59 +92,67 @@ def init_memory(memory_dir: str = "./bot_memory"):
         MEMORY_DIR = configured_path
         MEMORY_DIR.mkdir(exist_ok=True)
 
-    USER_SUMMARIES_FILE = MEMORY_DIR / "user_summaries.json"
-    CONVERSATIONS_FILE = MEMORY_DIR / "conversations.json"
+    DB_PATH = MEMORY_DIR / "memory.db"
+    _conn = _connect(DB_PATH)
+    _init_schema(_conn)
+    print(f"[memory] SQLite store ready at {DB_PATH}")
 
 
-# === Embedding Utilities ===
+# === Encoding Utilities ===
+
+def _compress(text: str) -> bytes:
+    """zlib-compress text (obfuscates + shrinks it on disk)."""
+    return zlib.compress((text or "").encode("utf-8"))
+
+
+def _decompress(blob) -> str:
+    if not blob:
+        return ""
+    try:
+        return zlib.decompress(blob).decode("utf-8")
+    except (zlib.error, TypeError):
+        return ""
+
+
+def _serialize_vector(vec: list[float]) -> bytes:
+    """Pack a float list into little-endian float32 bytes for sqlite-vec."""
+    return struct.pack("<%sf" % len(vec), *vec)
+
 
 def get_embedding(text: str) -> list[float]:
-    """Get embedding vector from Ollama."""
+    """Get an embedding vector from Ollama."""
     response = ollama.embed(model=EMBEDDING_MODEL, input=text)
     return response["embeddings"][0]
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    dot_product = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot_product / (norm_a * norm_b)
-
-
-# === User Summaries (Option 3) ===
-
-def load_user_summaries() -> dict:
-    """Load all user summaries from disk."""
-    if USER_SUMMARIES_FILE.exists():
-        return json.loads(USER_SUMMARIES_FILE.read_text())
-    return {}
-
-
-def save_user_summaries(summaries: dict):
-    """Save user summaries to disk."""
-    USER_SUMMARIES_FILE.write_text(json.dumps(summaries, indent=2))
-
+# === User Summaries ===
 
 def get_user_summary(user_id: str) -> str | None:
-    """Get the stored summary for a specific user."""
-    summaries = load_user_summaries()
-    user_data = summaries.get(str(user_id))
-    if user_data:
-        return user_data.get("summary")
-    return None
+    """Get the stored summary for a specific user, or None."""
+    if _conn is None:
+        return None
+    with _lock:
+        row = _conn.execute(
+            "SELECT summary FROM user_summaries WHERE user_id = ?", (str(user_id),)
+        ).fetchone()
+    if row is None:
+        return None
+    return _decompress(row[0])
 
 
 def update_user_summary(user_id: str, summary: str):
-    """Update the summary for a specific user."""
-    summaries = load_user_summaries()
-    summaries[str(user_id)] = {
-        "summary": summary,
-        "updated_at": datetime.now().isoformat()
-    }
-    save_user_summaries(summaries)
+    """Insert or update the summary for a specific user."""
+    if _conn is None:
+        return
+    with _lock:
+        _conn.execute(
+            """INSERT INTO user_summaries (user_id, summary, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET summary = excluded.summary,
+                                                  updated_at = excluded.updated_at""",
+            (str(user_id), _compress(summary), datetime.now().isoformat()),
+        )
+        _conn.commit()
 
 
 async def generate_user_summary(
@@ -101,11 +161,9 @@ async def generate_user_summary(
     recent_messages: list[dict],
     model: str
 ) -> str:
-    """
-    Ask the LLM to summarise what it knows about a user based on recent messages.
-    Stores the summary and returns it.
-    """
+    """Ask the LLM to summarise what it knows about a user, store it, and return it."""
     # Filter to just this user's messages
+    # TODO: this prefix match is imperfect vs the "name(id)[time]:" input format; pre-existing.
     user_messages = [
         m["content"] for m in recent_messages
         if m["role"] == "user" and m["content"].startswith(f"{user_name}:")
@@ -114,7 +172,6 @@ async def generate_user_summary(
     if not user_messages:
         return ""
 
-    # Get existing summary to build upon
     existing = get_user_summary(user_id)
     existing_context = f"Previous summary: {existing}\n\n" if existing else ""
 
@@ -136,22 +193,10 @@ Recent messages:
     return summary
 
 
-# === Conversation Memory (Option 2) ===
-
-def load_conversations() -> list[dict]:
-    """Load all stored conversations."""
-    if CONVERSATIONS_FILE.exists():
-        return json.loads(CONVERSATIONS_FILE.read_text())
-    return []
-
-
-def save_conversations(conversations: list[dict]):
-    """Save conversations to disk."""
-    CONVERSATIONS_FILE.write_text(json.dumps(conversations, indent=2))
-
+# === Conversation Memory ===
 
 def generate_conv_id(channel_id: str, timestamp: str) -> str:
-    """Generate a unique ID for a conversation snippet."""
+    """Generate a stable-ish unique id for a conversation snippet."""
     raw = f"{channel_id}:{timestamp}"
     return hashlib.md5(raw.encode()).hexdigest()[:16]
 
@@ -162,40 +207,51 @@ def store_conversation(
     summary: str = None,
     max_conversations: int = 500
 ):
-    """
-    Store a conversation snippet for later semantic retrieval.
-    If no summary provided, uses the raw messages as the document.
-    """
+    """Store a conversation snippet (document + embedding) for later semantic retrieval."""
+    if _conn is None:
+        return
+
     timestamp = datetime.now().isoformat()
     conv_id = generate_conv_id(str(channel_id), timestamp)
 
-    # Create a text representation of the conversation
     if summary:
         document = summary
     else:
-        document = "\n".join([
-            f"{m['role']}: {m['content'][:200]}"
-            for m in messages[-5:]  # Last 5 messages
-        ])
+        document = "\n".join(
+            f"{m['role']}: {m['content'][:200]}" for m in messages[-5:]
+        )
 
-    # Generate embedding for semantic search
     embedding = get_embedding(document)
+    if len(embedding) != EMBEDDING_DIM:
+        print(f"[WARN] embedding dim {len(embedding)} != {EMBEDDING_DIM}; skipping store")
+        return
 
-    conversations = load_conversations()
-    conversations.append({
-        "id": conv_id,
-        "document": document,
-        "embedding": embedding,
-        "channel_id": str(channel_id),
-        "timestamp": timestamp,
-        "message_count": len(messages)
-    })
+    with _lock:
+        cur = _conn.execute(
+            """INSERT INTO conversations (conv_id, channel_id, timestamp, message_count, document)
+               VALUES (?, ?, ?, ?, ?)""",
+            (conv_id, str(channel_id), timestamp, len(messages), _compress(document)),
+        )
+        rowid = cur.lastrowid
+        _conn.execute(
+            "INSERT INTO conversations_vec (rowid, embedding) VALUES (?, ?)",
+            (rowid, _serialize_vector(embedding)),
+        )
 
-    # Keep only last N conversations to prevent unbounded growth
-    if len(conversations) > max_conversations:
-        conversations = conversations[-max_conversations:]
+        # Trim to the most recent `max_conversations` to bound growth.
+        (count,) = _conn.execute("SELECT COUNT(*) FROM conversations").fetchone()
+        if count > max_conversations:
+            overflow = count - max_conversations
+            old_ids = [
+                r[0] for r in _conn.execute(
+                    "SELECT id FROM conversations ORDER BY id ASC LIMIT ?", (overflow,)
+                ).fetchall()
+            ]
+            placeholders = ",".join("?" * len(old_ids))
+            _conn.execute(f"DELETE FROM conversations WHERE id IN ({placeholders})", old_ids)
+            _conn.execute(f"DELETE FROM conversations_vec WHERE rowid IN ({placeholders})", old_ids)
 
-    save_conversations(conversations)
+        _conn.commit()
 
 
 def recall_relevant_conversations(
@@ -203,59 +259,37 @@ def recall_relevant_conversations(
     n_results: int = 3,
     channel_id: str = None
 ) -> list[str]:
-    """
-    Find past conversations semantically relevant to the current query.
-    Optionally filter by channel.
-    """
-    conversations = load_conversations()
-    if not conversations:
+    """Find past conversations semantically relevant to the query via KNN vector search."""
+    if _conn is None:
         return []
 
-    # Filter by channel if specified
-    if channel_id:
-        conversations = [c for c in conversations if c["channel_id"] == str(channel_id)]
-
-    if not conversations:
-        return []
-
-    # Get query embedding and compute similarities
     query_embedding = get_embedding(query)
+    if len(query_embedding) != EMBEDDING_DIM:
+        return []
+    query_blob = _serialize_vector(query_embedding)
 
-    scored = []
-    for conv in conversations:
-        similarity = cosine_similarity(query_embedding, conv["embedding"])
-        scored.append((similarity, conv["document"]))
+    # Over-fetch, then apply the optional channel filter + distance threshold in Python.
+    k = max(n_results * 5, 20)
+    with _lock:
+        rows = _conn.execute(
+            """SELECT c.document, c.channel_id, v.distance
+               FROM conversations_vec v
+               JOIN conversations c ON c.id = v.rowid
+               WHERE v.embedding MATCH ? AND k = ?
+               ORDER BY v.distance""",
+            (query_blob, k),
+        ).fetchall()
 
-    # Sort by similarity (highest first) and return top n
-    scored.sort(reverse=True, key=lambda x: x[0])
-
-    # Only return if similarity is above threshold
-    threshold = 0.3
-    results = [doc for score, doc in scored[:n_results] if score > threshold]
-
+    results = []
+    for document_blob, row_channel, distance in rows:
+        if channel_id is not None and row_channel != str(channel_id):
+            continue
+        if distance > _MAX_COSINE_DISTANCE:
+            continue
+        results.append(_decompress(document_blob))
+        if len(results) >= n_results:
+            break
     return results
-
-
-async def generate_conversation_summary(
-    messages: list[dict],
-    model: str
-) -> str:
-    """Generate a brief summary of a conversation for storage."""
-    conversation_text = "\n".join([
-        f"{m['role']}: {m['content'][:300]}"
-        for m in messages[-10:]
-    ])
-
-    prompt = f"""Summarize this conversation in 2-3 sentences. Focus on the main topic and any important information exchanged.
-
-{conversation_text}"""
-
-    client = ollama.AsyncClient()
-    response = await client.chat(
-        model=model,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.message.content
 
 
 # === Helper for main.py ===
@@ -267,24 +301,17 @@ def build_memory_context(
     do_user_memory: bool = False,
     do_conversation_memory: bool = False,
 ) -> str | None:
-    """
-    Build a memory context string to inject into the system prompt.
-    Returns None if no relevant memories found.
-    """
+    """Build a memory context string to inject into the system prompt, or None."""
     context_parts = []
 
-    # Add user summary if available
     if do_user_memory:
         user_summary = get_user_summary(user_id)
         if user_summary:
             context_parts.append(f"About this user: {user_summary}")
 
-    # Add relevant past conversations
     if do_conversation_memory:
         relevant = recall_relevant_conversations(
-            current_message,
-            n_results=2,
-            channel_id=channel_id
+            current_message, n_results=2, channel_id=channel_id
         )
         if relevant:
             context_parts.append("Relevant past conversations:\n" + "\n---\n".join(relevant))

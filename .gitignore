@@ -40,3 +40,6 @@ build/
 # Bot memory (user data, conversation history)
 bot_memory/
 kronk_memory/
+
+# Persisted reminders
+bot_reminders.json
