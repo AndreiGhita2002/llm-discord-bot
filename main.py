@@ -2,13 +2,14 @@ import os
 import re
 import random
 import time
-from collections.abc import Sequence
 from datetime import datetime, timezone, timedelta
 import discord
 import ollama
 import yaml
 
 import memory
+import tools
+from tools import ToolContext
 
 
 def strip_message_prefix(response: str) -> str:
@@ -72,13 +73,12 @@ CONFIG = load_config()
 DISCORD_TOKEN = os.environ.get("DISCORD_BOT_TOKEN") or os.environ.get("KRONK_TOKEN")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 
-# Web search requires config enabled and API key (ollama.web_search uses cloud API)
-do_websearch = CONFIG.get("web_search", False) and bool(OLLAMA_API_KEY)
-
 # Load from config
-MODEL = CONFIG.get("model", "gemma3:27b")
-FUNCTION_MODEL = CONFIG.get("function_model", "functionary")
+MODEL = CONFIG.get("model", "qwen3.5:35b-a3b")
 SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful chatbot.")
+
+# Max rounds of tool calls before forcing a final answer (prevents infinite loops)
+MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
@@ -91,46 +91,11 @@ client = discord.Client(intents=intents)
 _processed_messages: set[int] = set()
 _processed_messages_max = 10
 
-# Tool definitions for the function-calling model
-TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for current information. Use this when the user asks about recent events, "
-                           "needs up-to-date information, or asks you to look something up online."
-                           "Only use this when necessary, as this operation is very intensive",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query"
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_fetch",
-            "description": "Fetch the contents of a web page. Only use when the user explicitly provides an HTTP/HTTPS "
-                           "URL (like https://example.com). Do NOT use for Discord IDs, numbers, or non-URL strings.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "A full HTTP/HTTPS URL."
-                    }
-                },
-                "required": ["url"]
-            }
-        }
-    }
-]
+# Guard so persisted reminders are only rescheduled once (on_ready can fire on reconnects)
+_reminders_rescheduled = False
+
+# Post a short "looking this up…" line to the channel before running a lookup tool.
+ANNOUNCE_TOOLS = CONFIG.get("announce_tools", True)
 
 do_memory = CONFIG.get("memory", {}).get("do_memory", False)
 do_user_memory = CONFIG.get("memory", {}).get("user_memory", False)
@@ -166,62 +131,18 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
     return messages
 
 
-async def execute_tool(tool_name: str, arguments: dict) -> str:
-    """Execute a tool and return its result as a string."""
-    if tool_name == "web_search":
-        print(f"[TOOL] web_search: {arguments['query']}")
-        result = ollama.web_search(arguments["query"])
-        return f"Web search results for '{arguments['query']}':\n{result}"
-    elif tool_name == "web_fetch":
-        url = arguments["url"]
-        # Validate URL before fetching
-        if not url.startswith(("http://", "https://")):
-            print(f"[TOOL] web_fetch: invalid URL '{url}' (skipped)")
-            return f"Invalid URL: {url} (must start with http:// or https://)"
-        print(f"[TOOL] web_fetch: {url}")
-        result = ollama.web_fetch(url)
-        return f"Contents of {url}:\n{result}"
-    else:
-        return f"Unknown tool: {tool_name}"
+async def query_ollama(messages: list[dict], memory_context: str = None,
+                       ctx: ToolContext = None) -> str:
+    """Query the tool-calling model, running an agentic tool loop until a final answer.
 
+    The single model natively decides when to call tools. On each round we execute any
+    requested tools (via the tools registry), feed their results back as 'tool' messages,
+    and let the model continue - so it can chain calls (e.g. search -> fetch -> answer) and
+    see results before responding. Bounded by MAX_TOOL_ROUNDS to prevent runaway loops.
 
-async def query_function_model(messages: list[dict]) -> Sequence[dict] | None:
-    """Query the function-calling model to determine if tools should be used.
-
-    Returns a list of tool calls if the model decides to use tools, None otherwise.
+    `ctx` carries the Discord message/client so tools can act on the server; when None
+    (e.g. offline tests) only context-free tools work.
     """
-    if not do_websearch:
-        return None
-
-    ollama_client = ollama.AsyncClient()
-
-    # Build a simplified prompt for tool decision
-    function_system = """You decide whether to use tools based on the user's MOST RECENT message.
-
-RULES:
-- web_search: ONLY use if the user explicitly asks to "search", "look up", or "find" something online.
-- web_fetch: ONLY use if the user's message contains an actual URL (starting with http:// or https://). NEVER invent URLs.
-- If unsure, do NOT use any tools.
-- Most messages need NO tools - only use them when clearly requested."""
-
-    function_messages = [{"role": "system", "content": function_system}] + messages
-
-    start_time = time.time()
-    response = await ollama_client.chat(
-        model=FUNCTION_MODEL,
-        messages=function_messages,
-        tools=TOOL_DEFINITIONS,
-    )
-    elapsed = time.time() - start_time
-    print(f"[TIMING] Function model ({FUNCTION_MODEL}): {elapsed:.2f}s")
-
-    if response.message.tool_calls:
-        return response.message.tool_calls
-    return None
-
-
-async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
-    """Query the main conversation model, optionally using tools via the function model."""
     ollama_client = ollama.AsyncClient()
 
     # Build system prompt with optional memory context
@@ -229,47 +150,62 @@ async def query_ollama(messages: list[dict], memory_context: str = None) -> str:
     if memory_context:
         system_content += f"\n\n[Memory Context]\n{memory_context}\n"
 
-    # First, check if we need to use any tools (via the function-calling model)
-    tool_results = []
-    tool_calls = await query_function_model(messages)
+    conversation = [{"role": "system", "content": system_content}] + list(messages)
+    tool_schemas = tools.get_schemas()
 
-    if tool_calls:
-        print(f"[DEBUG] Function model requested tools: {[t.function.name for t in tool_calls]}")
-        seen_calls = set()  # Deduplicate tool calls
+    for round_num in range(MAX_TOOL_ROUNDS):
+        start_time = time.time()
+        response = await ollama_client.chat(
+            model=MODEL,
+            messages=conversation,
+            tools=tool_schemas,
+        )
+        elapsed = time.time() - start_time
+        print(f"[TIMING] Model ({MODEL}) round {round_num + 1}: {elapsed:.2f}s")
+
+        tool_calls = response.message.tool_calls
+        if not tool_calls:
+            return response.message.content
+
+        # Record the assistant's tool-call turn, then execute each requested tool.
+        conversation.append(response.message)
+        print(f"[DEBUG] Tool calls: {[t.function.name for t in tool_calls]}")
+
+        seen_calls = set()  # Deduplicate identical calls within a round
         for tool_call in tool_calls:
-            # Create a key for deduplication
-            call_key = (tool_call.function.name, str(tool_call.function.arguments))
+            name = tool_call.function.name
+            args = tool_call.function.arguments
+            call_key = (name, str(args))
             if call_key in seen_calls:
-                print(f"[DEBUG] Skipping duplicate: {tool_call.function.name}")
+                print(f"[DEBUG] Skipping duplicate: {name}")
                 continue
             seen_calls.add(call_key)
 
+            # Announce lookups so users know we're drawing from a real source.
+            if ANNOUNCE_TOOLS and ctx is not None and ctx.message is not None:
+                note = tools.announce(name, args, ctx)
+                if note:
+                    try:
+                        await ctx.message.channel.send(note)
+                    except Exception as e:
+                        print(f"[WARN] Could not send tool announcement: {e}")
+
             try:
-                result = await execute_tool(
-                    tool_call.function.name,
-                    tool_call.function.arguments
-                )
-                tool_results.append(result)
-                print(f"[DEBUG] Tool {tool_call.function.name} returned {len(result)} chars")
+                result = await tools.execute(name, args, ctx or ToolContext())
+                print(f"[DEBUG] Tool {name} returned {len(result)} chars")
             except Exception as e:
-                print(f"[WARN] Tool {tool_call.function.name} failed: {e}")
-                tool_results.append(f"Tool error: {e}")
+                print(f"[WARN] Tool {name} failed: {e}")
+                result = f"Tool error: {e}"
 
-    # Add tool results to system prompt if any
-    if tool_results:
-        system_content += "\n\n[Tool Results]\n" + "\n\n".join(tool_results) + "\n"
+            conversation.append({
+                "role": "tool",
+                "tool_name": name,
+                "content": result,
+            })
 
-    full_messages = [{"role": "system", "content": system_content}] + messages
-
-    # Query the main conversation model
-    start_time = time.time()
-    response = await ollama_client.chat(
-        model=MODEL,
-        messages=full_messages,
-    )
-    elapsed = time.time() - start_time
-    print(f"[TIMING] Main model ({MODEL}): {elapsed:.2f}s")
-
+    # Exhausted tool rounds - force a final answer with tools disabled.
+    print(f"[WARN] Hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}); forcing final answer")
+    response = await ollama_client.chat(model=MODEL, messages=conversation)
     return response.message.content
 
 
@@ -286,13 +222,21 @@ async def on_ready():
     status_parts = []
     if do_memory:
         status_parts.append(status_config.get("memory_enabled", "Memory on"))
-    if do_websearch:
+    if tools.is_enabled("web_search"):
         status_parts.append(status_config.get("websearch_enabled", "Web search on"))
 
     if status_parts:
         status_text = " | ".join(status_parts)
         await client.change_presence(activity=discord.Game(name=status_text))
         print(f"Status set: {status_text}")
+
+    # Restore reminders that were pending before the last shutdown (once, not per reconnect).
+    global _reminders_rescheduled
+    if not _reminders_rescheduled:
+        _reminders_rescheduled = True
+        restored = await tools.reschedule_reminders(client)
+        if restored:
+            print(f"Restored {restored} pending reminder(s)")
 
 
 @client.event
@@ -348,9 +292,10 @@ async def on_message(message: discord.Message):
                 do_conversation_memory=do_conversation_memory,
             )
 
-        # Query the LLM
+        # Query the LLM (ctx lets tools act on the server: react, set status, etc.)
+        ctx = ToolContext(message=message, client=client, model=MODEL)
         try:
-            response = await query_ollama(messages, memory_context=memory_context)
+            response = await query_ollama(messages, memory_context=memory_context, ctx=ctx)
         except TimeoutError:
             await message.reply("The request timed out. Please try again. 🥒")
             return
@@ -420,12 +365,23 @@ if __name__ == "__main__":
     if do_memory:
         memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
 
-    if do_websearch:
-        print(f"Web search enabled (function model: {FUNCTION_MODEL})")
+    # Configure the tool registry based on config + available capabilities.
+    enabled_tools = tools.configure(
+        CONFIG.get("tools", {}),
+        has_api_key=bool(OLLAMA_API_KEY),
+        memory_available=do_memory,
+    )
+    # Load any persona-specific announcement templates (fall back to built-in defaults).
+    tools.configure_announcements(CONFIG.get("tool_announcements"))
+
+    # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
+    tools.init_reminders(CONFIG.get("reminders_file", "./bot_reminders.json"))
+    if enabled_tools:
+        print(f"Tools enabled ({len(enabled_tools)}): {', '.join(enabled_tools)}")
     else:
-        if CONFIG.get("web_search", False) and not OLLAMA_API_KEY:
-            print("Web search disabled: OLLAMA_API_KEY not set")
-        else:
-            print("Web search disabled (enable with web_search: true in config + OLLAMA_API_KEY)")
+        print("No tools enabled.")
+    _tools_cfg = CONFIG.get("tools", {})
+    if (_tools_cfg.get("web_search") or _tools_cfg.get("web_fetch")) and not OLLAMA_API_KEY:
+        print("Note: web tools requested but disabled - OLLAMA_API_KEY not set")
 
     client.run(DISCORD_TOKEN)

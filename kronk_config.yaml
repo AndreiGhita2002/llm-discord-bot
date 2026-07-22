@@ -2,10 +2,8 @@
 # This file allows customization of the bot without modifying code.
 
 # LLM Model Settings
-model: "gemma3:27b"
-# Function-calling model for tool decisions (web search, etc.)
-# This model decides when to use tools; the main model generates responses
-function_model: "functiongemma"
+# Must be a model with native tool-calling support (used for the agentic tool loop).
+model: "qwen3.5:35b-a3b"
 
 # System prompt - defines the bot's personality and behaviour
 # Special strings: github_url, discord_display_name, discord_user_id
@@ -98,15 +96,78 @@ github_url: "https://github.com/AndreiGhita2002/llm-discord-bot"
 # Memory storage directory
 memory_dir: "./bot_memory"
 
-# Web search (requires OLLAMA_API_KEY env var)
-web_search: false
+# Where pending reminders are persisted (survive restarts; overdue ones fire on next startup)
+reminders_file: "./bot_reminders.json"
 
 # Bot status strings (shown as "Playing <text>")
 status:
   memory_enabled: "Kronk remembers"
   websearch_enabled: "Web search on"
 
-# Tools configuration
-# TODO: Implement tool system
-# tools:
-#   enabled: []
+# Tool calling
+# The main model natively decides when to call tools, runs them, and can chain calls.
+# Max rounds of tool calls before the bot is forced to give a final answer.
+max_tool_rounds: 5
+
+# Post a short "Looking up X on Wikipedia…" line to the channel before a lookup tool runs,
+# so users know the answer draws from a real/deterministic source. Set false to stay silent.
+announce_tools: true
+
+# Announcement templates, in Kronk's voice. One variant is picked at random each time for
+# variety. Placeholders are filled from the tool's arguments:
+#   web_search/wikipedia/recall {query}, web_fetch {url}, calculator {expression},
+#   get_time {timezone}, get_user_info {name}.
+# Set a tool to [] to silence just that one; omit a tool to use the built-in neutral default.
+tool_announcements:
+  web_search:
+    - "🔎 Ooh ooh, hang on — lemme go find “{query}” for ya!"
+    - "🔎 Say no more! Hittin' the web for “{query}”…"
+    - "🔎 On it! Time to track down “{query}”. This is my jam."
+  web_fetch:
+    - "🌐 Righto! Crackin' open {url}…"
+    - "🌐 Gimme a sec, I'll go read {url} real quick."
+  wikipedia:
+    - "📖 Ooh, I think I know this one! …okay maybe not. Checkin' Wikipedia for “{query}”…"
+    - "📖 To the encyclopedia! Lookin' up “{query}” for ya."
+    - "📖 Hang tight, flippin' through the ol' Wikipedia for “{query}”…"
+  get_user_info:
+    - "🪪 Lemme pull up {name}'s file. I keep tabs, y'know."
+    - "🪪 Ooh, peekin' at what I got on {name}…"
+  recall:
+    - "🧠 Ohh, this is gonna bug me — lemme remember about “{query}”…"
+    - "🧠 Hang on hang on, I got this! Searchin' the ol' noggin for “{query}”…"
+    - "🧠 Pretty sure I know somethin' about “{query}”. Lemme think…"
+  calculator:
+    - "🧮 Numbers! My favorite. Crunchin' {expression}…"
+    - "🧮 Ooh, math! Lemme work out {expression}…"
+  get_time:
+    - "🕐 Lemme squint at the ol' clock for {timezone}…"
+    - "🕐 One sec, checkin' the time in {timezone}!"
+
+# Per-tool on/off switches. Requirements noted in comments still apply even if set true:
+#   - web_search / web_fetch need the OLLAMA_API_KEY env var
+#   - remember_fact / recall need memory.do_memory: true
+#   - Discord action tools (reactions, nickname, polls…) need the matching bot permissions
+tools:
+  # Web (require OLLAMA_API_KEY) - opt in once you have a key
+  web_search: false
+  web_fetch: false
+  # Fun / social
+  roll_dice: true
+  flip_coin: true
+  random_choice: true
+  set_reminder: true
+  create_poll: true
+  start_thread: true
+  # Knowledge / utility
+  wikipedia: true
+  calculator: true
+  get_time: true
+  # Embodiment / presence
+  add_reaction: true
+  set_status: true
+  set_nickname: true
+  get_user_info: true
+  # Memory (require memory.do_memory: true)
+  remember_fact: true
+  recall: true
