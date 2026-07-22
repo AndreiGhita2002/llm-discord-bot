@@ -70,6 +70,15 @@ if [ -z "$DISCORD_BOT_TOKEN" ]; then
     fi
 fi
 
+# Optionally capture OLLAMA_API_KEY (needed for the web_search / web_fetch tools). launchd
+# does not inherit your shell env, so it must be baked into the plist to reach the bot.
+if [ -z "$OLLAMA_API_KEY" ]; then
+    read -p "Enter your OLLAMA_API_KEY for web search (or press Enter to skip): " OLLAMA_KEY_INPUT
+    if [ -n "$OLLAMA_KEY_INPUT" ]; then
+        OLLAMA_API_KEY="$OLLAMA_KEY_INPUT"
+    fi
+fi
+
 # Create the runner script that handles updates
 echo -e "${GREEN}Creating bot runner script...${NC}"
 cat > "$BOT_DIR/run-bot.sh" << 'RUNNER_EOF'
@@ -226,6 +235,8 @@ cat > "$PLIST_PATH" << PLIST_EOF
         <string>${EXPANDED_HOME}</string>
         <key>DISCORD_BOT_TOKEN</key>
         <string>${DISCORD_BOT_TOKEN:-YOUR_TOKEN_HERE}</string>
+        <key>OLLAMA_API_KEY</key>
+        <string>${OLLAMA_API_KEY:-}</string>
         <key>UPDATE_CHECK_INTERVAL</key>
         <string>${UPDATE_CHECK_INTERVAL}</string>
         <key>GIT_BRANCH</key>
