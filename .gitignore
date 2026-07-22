@@ -43,3 +43,6 @@ kronk_memory/
 
 # Persisted reminders
 bot_reminders.json
+
+# Single-instance lock
+.bot.lock

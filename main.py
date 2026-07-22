@@ -1,5 +1,7 @@
 import os
 import re
+import sys
+import fcntl
 import asyncio
 import random
 import time
@@ -415,9 +417,43 @@ async def on_message(message: discord.Message):
         await _formulate_and_reply(message, ref_msg)
 
 
+# Keep a reference to the instance-lock file handle for the process's lifetime.
+_instance_lock_handle = None
+
+
+def acquire_single_instance_lock() -> bool:
+    """Ensure only one bot instance runs from this directory.
+
+    Uses an exclusive advisory flock on a lock file. The OS releases the lock automatically
+    when the holding process dies (even on kill -9), so there's no stale-lock problem - unlike
+    a PID-file check. Returns False if another instance already holds the lock.
+
+    This is the real guard against duplicate replies: the per-channel lock only serializes
+    within one process, but a daemon with flaky process tracking can spawn several. Bots run
+    from different directories use different lock files, so they don't block each other.
+    """
+    global _instance_lock_handle
+    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
+    handle = open(lock_path, "w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return False
+    handle.write(str(os.getpid()))
+    handle.flush()
+    _instance_lock_handle = handle  # keep alive so the lock is held
+    return True
+
+
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
+
+    # Refuse to start a second instance (prevents duplicate replies from orphaned processes).
+    if not acquire_single_instance_lock():
+        print("Another bot instance is already running (holds .bot.lock); exiting.")
+        sys.exit(0)
 
     #======
     # Init
