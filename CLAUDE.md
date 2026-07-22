@@ -21,18 +21,20 @@ When updating the changelog in README.md:
 ## Project Structure
 
 - `main.py` - Main bot code
+- `tools.py` - Tool registry (schemas + handlers + config gating) for native tool calling
 - `kronk_config.yaml` - Default config (Kronk persona), always loaded as base
 - `config.yaml` - User overrides (gitignored, optional). Only needs fields you want to change.
-- `memory.py` - Lightweight memory system (user summaries + conversation recall)
+- `memory.py` - Lightweight memory system (user summaries + conversation recall), SQLite + sqlite-vec backed
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
 - `setup-memory.sh` - Initializes memory directory and pulls embedding model
-- `bot_memory/` - Created by setup script, stores user summaries and conversation embeddings (gitignored)
+- `bot_memory/` - Holds `memory.db` (SQLite + sqlite-vec: user summaries + conversation embeddings), created on first run (gitignored)
+- `bot_reminders.json` - Persisted pending reminders, rescheduled on startup (gitignored)
 
 ## Key Configuration
 
 Configuration uses `kronk_config.yaml` as defaults, with `config.yaml` providing overrides. The configs are deep-merged, so `config.yaml` only needs fields you want to change (nested fields like `memory.do_memory` work too).
-- **Model**: Configurable in `config.yaml` (default: `gemma3:27b`)
+- **Model**: Configurable in `config.yaml` (default: `qwen3.5:35b-a3b`; must support native tool calling)
 - **System prompt**: Customizable personality/behavior in `config.yaml`. Supports placeholders:
   - `{{discord_display_name}}`: Bot's display name (replaced at runtime)
   - `{{discord_user_id}}`: Bot's user ID (replaced at runtime)
@@ -59,18 +61,41 @@ Environment variables:
 3. Referenced messages are inserted *before* the user's current message in context (so model responds to user, not the reference)
 4. Uses `ollama.AsyncClient()` for async LLM calls
 
-## Web Search Feature
+## Web Search / Tool Calling
 
-Web search uses a **two-model architecture** to work with models that don't support tool calling:
-1. **Function model** (e.g., `functionary`): Decides if/which tools to call based on the user's message
-2. **Main model** (e.g., `gemma3:27b`): Generates the conversational response with tool results injected into context
+The bot uses a **single tool-calling model** (default `qwen3.5:35b-a3b`) that natively decides
+when to call tools. `query_ollama()` runs an agentic loop: call the model with the available tools →
+if it requests tools, execute them and feed results back as `role: "tool"` messages → repeat until
+the model returns a final answer (bounded by `max_tool_rounds`, default 5). This supports multi-step
+tool use, e.g. `web_search` → `web_fetch` → answer.
 
-This approach keeps the personality model (gemma3) for all user-facing responses while using a specialized model for tool decisions.
+Tools live in `tools.py` as a registry of `Tool(name, schema, handler, ...)` entries.
+`configure()` reads the `tools:` config section (+ capability checks) to decide which are active;
+`get_schemas()` feeds the model; `execute()` dispatches a call. Handlers get `(args, ctx)` where
+`ctx: ToolContext` carries the Discord `message`/`client` so tools can act on the server.
 
-**Requirements**:
-- `function_model` in config (default: `functionary`) - pull with `ollama pull functionary`
-- `web_search: true` in config
-- `OLLAMA_API_KEY` env var (the actual web search/fetch uses Ollama's cloud API)
+**Adding a tool**: write an `async def _handler(args, ctx) -> str`, add one `Tool(...)` entry to
+`_REGISTRY`, and add its default to the `tools:` block in `kronk_config.yaml`. If it's a lookup,
+add a `DEFAULT_ANNOUNCEMENTS` entry (list of variants) so the bot posts "Looking up …" before it runs.
+
+**Available tools** (each toggled in `tools:` config):
+- Web (need `OLLAMA_API_KEY`): `web_search`, `web_fetch`
+- Fun/social: `roll_dice`, `flip_coin`, `random_choice`, `set_reminder`, `create_poll`, `start_thread`
+- Knowledge: `wikipedia` (no key needed), `calculator` (safe AST eval), `get_time`
+- Embodiment: `add_reaction`, `set_status`, `set_nickname`, `get_user_info`
+- Memory (need `memory.do_memory`): `remember_fact`, `recall`
+
+**Gating**: web tools require `OLLAMA_API_KEY`; memory tools require `do_memory`; Discord action
+tools require the bot's role/permissions at runtime. The `model` must support native tool calling
+(gemma3 does NOT; qwen3.5, llama3.1, mistral do).
+
+**Tool announcements** (`announce_tools: true`): before a *lookup* tool runs, the bot posts a short
+"🔎 Searching…"/"📖 Looking up… on Wikipedia" line so users know the reply draws from a real source.
+Action tools (reactions, status…) don't announce - the action is self-evident. Each tool has a list
+of variants (one picked at random for variety) with `{placeholder}` fields from the tool's args.
+Neutral defaults live in `tools.py` (`DEFAULT_ANNOUNCEMENTS`); per-persona overrides go in the
+`tool_announcements:` config block (kronk_config.yaml ships Kronk-voiced ones). Loaded via
+`tools.configure_announcements()`.
 
 ## Memory System
 
@@ -82,17 +107,30 @@ The bot has a lightweight memory system (`memory.py`) that provides:
 
 Both features can be independently toggled via config. The `do_memory` flag is a master switch that disables all memory features when false.
 
+**Storage** (`memory.db`, SQLite + sqlite-vec):
+- Embeddings are stored as packed **float32 blobs** and indexed for KNN via the `sqlite-vec` vec0 virtual table (`distance_metric=cosine`) - far more space/CPU efficient than the old JSON-load-and-linear-scan approach.
+- User summaries and conversation documents are stored **zlib-compressed** - smaller on disk and not casually human-readable (the whole `.db` is binary anyway). This is obfuscation, not encryption: the goal was efficiency + no plaintext, not confidentiality (the host holds no key to protect).
+- Two tables: `conversations` (metadata + compressed `document`) joined by rowid to `conversations_vec` (the vectors); plus `user_summaries`. Access is serialized by a `threading.Lock` since recall runs in a worker thread.
+- Channel filtering over-fetches KNN then filters in Python (fine at this scale).
+
 **Requirements**:
-- Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text`
-- Data stored in `./bot_memory/` directory (configurable via `memory_dir` in config.yaml)
-- Backward compatible: falls back to `./kronk_memory/` if it exists
+- Needs `nomic-embed-text` model in Ollama: `ollama pull nomic-embed-text` (768-dim; `EMBEDDING_DIM` in memory.py must match if the model changes)
+- `sqlite-vec` Python package (in pyproject); the host Python's `sqlite3` must allow loadable extensions
+- Data stored in `./bot_memory/memory.db` (dir configurable via `memory_dir` in config.yaml), created on first run
+- Backward compatible: falls back to `./kronk_memory/` dir if it exists (old `*.json` files are ignored, not migrated)
 - Keeps last N conversations (configurable via `max_stored_conversations`, default 500) to prevent unbounded growth
 
 ## Known Issues / TODOs
 
-[ ] Websearch: implemented two-model architecture, needs testing.
+[x] Websearch: migrated from two-model hack to single-model native tool-calling loop (smoke-tested with llama3.1:8b; verify web_search/web_fetch on the deployed qwen3.5 model with a real OLLAMA_API_KEY).
+[x] Configurable tools system: `tools:` config section with per-tool on/off (see `tools.py`).
+[x] Expanded tool set: web, fun/social, knowledge, embodiment, and memory tools (moderation intentionally skipped for now).
+[x] Tool-call announcements: bot posts "Looking up …" before lookups (`announce_tools`).
+[ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
+[x] Persist reminders: stored in `reminders_file` (default `./bot_reminders.json`); rescheduled on startup via `tools.reschedule_reminders()` in on_ready, overdue ones fire immediately.
+[x] Memory storage: migrated JSON -> SQLite + sqlite-vec (binary float32 vectors, zlib-compressed text). More efficient + not plaintext on disk. Verified with a fake embedding; run once against real `nomic-embed-text` on the deployed bot.
 [ ] Log channel feature: the user can set a channel for bot logs, and the bot will announce when it's turning on or off.
-[ ] Implement configurable tools system in config.yaml.
+[ ] Optional: moderation tools (timeout/role/pin) with a permission/allowlist model - deferred by choice.
 
 ## Running
 
