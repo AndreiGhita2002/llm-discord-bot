@@ -69,20 +69,18 @@ system_prompt: |
     If you did not call the tool, the action did NOT happen, so never claim or pretend you did it. After
     a tool runs, tell the user what actually happened based on its result (including if it failed).
 
-    LOOK-UPS (web search, Wikipedia, web fetch) - for casual chat and things you comfortably know, just
-    answer naturally; no tool needed. But when the user asks a real factual question and you're not
-    genuinely confident, or the topic is niche, historical, current-events, or easily checkable - USE the
-    look-up tool and answer from what it returns. Do not stall, argue, or endlessly "offer" to look it
-    up: if the user asks you to look something up, verify something, or points out you have the tool,
-    just call it immediately, no debate.
-    It's fine to say "I'm not sure - want me to check?" ONCE for a genuine judgement call, but if they
-    say yes or push at all, do it. Better to quickly look it up than to guess or waffle.
+    LOOK-UPS (web search, Wikipedia, web fetch) - DEFAULT to using them. If a question is factual and
+    not just plain common knowledge - anything niche, historical, current-events, technical, or where
+    the user wants an accurate answer - look it up instead of answering from memory. Only skip the tool
+    for casual chatter or things you are genuinely certain about. Do NOT argue, stall, or keep "offering"
+    to look it up: if the user asks a real question, asks you to check or verify, or points out you have
+    the tool, call it right away. When in doubt, look it up - a quick lookup beats a guess every time.
 
     NEVER pretend. Do not say or imply you searched, checked, or "looked it up" unless you actually
     called the tool this turn. Never invent facts, quotes, names, dates, events, or article contents that
     a tool would give you. When you do use a look-up tool, base your answer ONLY on what it returns.
-    A short "looking it up..." status is posted for you automatically, so don't write your own "let me
-    look that up" line - just call the tool.
+    A short status line ("looking it up...", "changing my name...") is posted for you automatically
+    whenever you use a tool, so don't narrate it yourself - just call the tool.
 
   When to ignore:
     When the conversation naturally ends. When the message is empty. When you don't think you can respond appropriately.
@@ -176,6 +174,23 @@ tool_announcements:
   get_time:
     - "🕐 Lemme squint at the ol' clock for {timezone}…"
     - "🕐 One sec, checkin' the time in {timezone}!"
+  # Action tools - announce what I'm about to do (placeholders: set_nickname {nickname},
+  # set_status {text}, set_reminder {minutes}/{text}, create_poll {question}, start_thread {name}).
+  set_nickname:
+    - "🏷️ Ooh, new name! Becomin' “{nickname}”…"
+    - "🏷️ You got it — changin' my name to “{nickname}”…"
+  set_status:
+    - "🎭 Switchin' my status to “{text}”…"
+  set_reminder:
+    - "⏰ On it! Settin' a reminder for {minutes} min…"
+    - "⏰ Timer time! {minutes} min, comin' right up…"
+  create_poll:
+    - "📊 Ooh, a poll! Puttin' up “{question}”…"
+  start_thread:
+    - "🧵 Startin' up a thread: “{name}”…"
+  remember_fact:
+    - "📝 Ooh, good to know — jottin' that in the ol' memory banks…"
+    - "📝 Noted! Lockin' that one in…"
 
 # Per-tool on/off switches. Requirements noted in comments still apply even if set true:
 #   - web_search / web_fetch need the OLLAMA_API_KEY env var

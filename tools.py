@@ -560,6 +560,27 @@ DEFAULT_ANNOUNCEMENTS: dict[str, list[str]] = {
         "🕐 Let me check the clock in {timezone}…",
         "🕐 Peeking at what time it is in {timezone}…",
     ],
+    # Action tools - announce what I'm about to do so it's visible.
+    "set_nickname": [
+        "🏷️ Changing my nickname to “{nickname}”…",
+        "🏷️ Renaming myself to “{nickname}”…",
+    ],
+    "set_status": [
+        "🎭 Updating my status to “{text}”…",
+    ],
+    "set_reminder": [
+        "⏰ Setting a reminder for {minutes} min…",
+        "⏰ On it — timer for {minutes} min…",
+    ],
+    "create_poll": [
+        "📊 Putting up a poll: “{question}”…",
+    ],
+    "start_thread": [
+        "🧵 Starting a thread: “{name}”…",
+    ],
+    "remember_fact": [
+        "📝 Noting that down…",
+    ],
 }
 
 # Active templates (defaults, overridden by configure_announcements()).
