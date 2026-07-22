@@ -122,8 +122,10 @@ run_bot() {
     cd "$BOT_DIR"
     log "Starting bot..."
 
-    # Run the bot using uv
-    uv run python main.py 2>&1 | tee -a "$LOG_FILE" &
+    # Run the bot using uv. Redirect straight to the log file (NO 'tee' pipe) so $! is the
+    # uv/python pid, not a pipeline wrapper - otherwise stop_bot kills the wrong process and
+    # orphaned bots pile up across restarts.
+    uv run python main.py >> "$LOG_FILE" 2>&1 &
     BOT_PID=$!
     echo $BOT_PID > "$BOT_DIR/bot.pid"
     log "Bot started with PID: $BOT_PID"
@@ -136,13 +138,18 @@ stop_bot() {
             log "Stopping bot (PID: $PID)..."
             kill "$PID" 2>/dev/null
             sleep 2
-            # Force kill if still running
             if kill -0 "$PID" 2>/dev/null; then
                 kill -9 "$PID" 2>/dev/null
             fi
         fi
         rm -f "$BOT_DIR/bot.pid"
     fi
+
+    # Belt-and-braces: kill any bot python still running from THIS directory (catches orphans
+    # left by earlier restarts). Dir-specific via the venv path, so other bots are untouched.
+    pkill -f "${BOT_DIR}/.venv/bin/python3 main.py" 2>/dev/null
+    pkill -f "${BOT_DIR}/.venv/bin/python main.py" 2>/dev/null
+    sleep 1
 }
 
 cleanup() {
