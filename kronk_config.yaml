@@ -174,9 +174,9 @@ tool_announcements:
 #   - remember_fact / recall need memory.do_memory: true
 #   - Discord action tools (reactions, nickname, polls…) need the matching bot permissions
 tools:
-  # Web (require OLLAMA_API_KEY) - opt in once you have a key
-  web_search: false
-  web_fetch: false
+  # Web (require OLLAMA_API_KEY) - enabled here, but only activate when the key is set
+  web_search: true
+  web_fetch: true
   # Fun / social
   roll_dice: true
   flip_coin: true
