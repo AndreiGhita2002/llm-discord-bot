@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 import random
 import time
 from datetime import datetime, timezone, timedelta
@@ -79,6 +80,9 @@ SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful chatbot.")
 
 # Max rounds of tool calls before forcing a final answer (prevents infinite loops)
 MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
+# Whether the model does its (slow) internal "thinking" pass. Off by default: much faster,
+# and stops reasoning traces from leaking into replies on reasoning models like qwen3.5.
+MODEL_THINK = CONFIG.get("use_thinking", False)
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
@@ -89,10 +93,37 @@ client = discord.Client(intents=intents)
 
 # Track recently processed messages to prevent double-replies
 _processed_messages: set[int] = set()
-_processed_messages_max = 10
+_processed_messages_max = 50
+
+# IDs of the bot's own tool-announcement messages ("Looking up ..."), so we can exclude them
+# from fetched history - otherwise the model reads them back as its own prior turns and keeps
+# "continuing" a half-started answer (a source of hallucination).
+_announcement_message_ids: set[int] = set()
+_announcement_ids_max = 200
+
+# Per-channel locks so concurrent messages in the same channel are handled one at a time
+# (prevents overlapping/duplicate replies and cross-contaminated context).
+_channel_locks: dict[int, asyncio.Lock] = {}
 
 # Guard so persisted reminders are only rescheduled once (on_ready can fire on reconnects)
 _reminders_rescheduled = False
+
+
+def _note_announcement_id(msg_id: int) -> None:
+    """Remember an announcement message id so it's excluded from future history fetches."""
+    _announcement_message_ids.add(msg_id)
+    if len(_announcement_message_ids) > _announcement_ids_max:
+        for old in sorted(_announcement_message_ids)[:_announcement_ids_max // 2]:
+            _announcement_message_ids.discard(old)
+
+
+def _get_channel_lock(channel_id: int) -> asyncio.Lock:
+    """Return the (shared) lock for a channel, creating it on first use."""
+    lock = _channel_locks.get(channel_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _channel_locks[channel_id] = lock
+    return lock
 
 # Post a short "looking this up…" line to the channel before running a lookup tool.
 ANNOUNCE_TOOLS = CONFIG.get("announce_tools", True)
@@ -120,6 +151,8 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
 
     messages = []
     async for msg in channel.history(limit=limit):
+        if msg.id in _announcement_message_ids:
+            continue  # Skip our own "Looking up ..." status messages (not real turns)
         if msg.author.bot and msg.author != channel.guild.me:
             continue  # Skip other bots, but include our own messages
         if not msg.content or not msg.content.strip():
@@ -129,6 +162,19 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
         messages.append(process_message(msg))
     messages.reverse()
     return messages
+
+
+async def _model_chat(client: ollama.AsyncClient, **kwargs):
+    """Call ollama chat, passing the configured `think` setting (off by default for speed).
+
+    Falls back to a plain call if the installed client/model doesn't accept `think`, so a
+    non-reasoning model still works.
+    """
+    try:
+        return await client.chat(think=MODEL_THINK, **kwargs)
+    except (TypeError, ollama.ResponseError) as e:
+        print(f"[WARN] 'think' param not accepted ({e}); retrying without it")
+        return await client.chat(**kwargs)
 
 
 async def query_ollama(messages: list[dict], memory_context: str = None,
@@ -155,7 +201,8 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
     for round_num in range(MAX_TOOL_ROUNDS):
         start_time = time.time()
-        response = await ollama_client.chat(
+        response = await _model_chat(
+            ollama_client,
             model=MODEL,
             messages=conversation,
             tools=tool_schemas,
@@ -186,7 +233,8 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
                 note = tools.announce(name, args, ctx)
                 if note:
                     try:
-                        await ctx.message.channel.send(note)
+                        sent = await ctx.message.channel.send(note)
+                        _note_announcement_id(sent.id)  # keep it out of future history
                     except Exception as e:
                         print(f"[WARN] Could not send tool announcement: {e}")
 
@@ -205,7 +253,7 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
     # Exhausted tool rounds - force a final answer with tools disabled.
     print(f"[WARN] Hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}); forcing final answer")
-    response = await ollama_client.chat(model=MODEL, messages=conversation)
+    response = await _model_chat(ollama_client, model=MODEL, messages=conversation)
     return response.message.content
 
 
@@ -239,38 +287,13 @@ async def on_ready():
             print(f"Restored {restored} pending reminder(s)")
 
 
-@client.event
-async def on_message(message: discord.Message):
-    global _processed_messages
+async def _formulate_and_reply(message: discord.Message, ref_msg):
+    """Fetch context, query the model (with tools), and send Kronk's reply.
 
-    if message.is_system():
-        return  # System message
-    if message.author == client.user:
-        return  # Message from this bot
-
-    # Deduplicate: skip if we've already processed this message
-    if message.id in _processed_messages:
-        print(f"[WARN] Duplicate message event detected (id={message.id}), skipping")
-        return
-    _processed_messages.add(message.id)
-    # Keep set bounded
-    if len(_processed_messages) > _processed_messages_max:
-        # Remove oldest entries (set is unordered, but message IDs are snowflakes so roughly ordered)
-        oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
-        _processed_messages -= set(oldest)
-
-    # fetch the referenced message if it exists:
-    ref_msg = None
-    if message.reference and message.reference.message_id:
-        ref_msg = await message.channel.fetch_message(message.reference.message_id)
-
-    # Only respond if mentioned or is responding to its message
-    is_mentioned = str(client.user.id) in message.content
-    is_reply = ref_msg is not None and ref_msg.author == client.user
-    if not is_mentioned and not is_reply:
-        return
-
-    # Formulating a response:
+    Runs under a per-channel lock (see on_message) so concurrent messages in the same channel
+    are handled one at a time - the next message only starts once this reply is on screen, so
+    it sees a clean, complete transcript instead of a half-finished one.
+    """
     overall_start = time.time()
     async with message.channel.typing():
         # Fetch last messages from this channel
@@ -353,6 +376,43 @@ async def on_message(message: discord.Message):
                 )
             except Exception as sum_err:
                 print(f"[WARN] Failed to generate user summary: {sum_err}")
+
+
+@client.event
+async def on_message(message: discord.Message):
+    global _processed_messages
+
+    if message.is_system():
+        return  # System message
+    if message.author == client.user:
+        return  # Message from this bot
+
+    # Deduplicate: skip if we've already processed this message
+    if message.id in _processed_messages:
+        print(f"[WARN] Duplicate message event detected (id={message.id}), skipping")
+        return
+    _processed_messages.add(message.id)
+    # Keep set bounded
+    if len(_processed_messages) > _processed_messages_max:
+        # Remove oldest entries (set is unordered, but message IDs are snowflakes so roughly ordered)
+        oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
+        _processed_messages -= set(oldest)
+
+    # fetch the referenced message if it exists:
+    ref_msg = None
+    if message.reference and message.reference.message_id:
+        ref_msg = await message.channel.fetch_message(message.reference.message_id)
+
+    # Only respond if mentioned or is responding to its message
+    is_mentioned = str(client.user.id) in message.content
+    is_reply = ref_msg is not None and ref_msg.author == client.user
+    if not is_mentioned and not is_reply:
+        return
+
+    # Serialize handling per channel so overlapping messages (common when several people
+    # talk to Kronk at once) don't produce duplicate replies or cross-contaminated context.
+    async with _get_channel_lock(message.channel.id):
+        await _formulate_and_reply(message, ref_msg)
 
 
 if __name__ == "__main__":

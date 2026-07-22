@@ -129,6 +129,8 @@ Both features can be independently toggled via config. The `do_memory` flag is a
 [ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
 [x] Persist reminders: stored in `reminders_file` (default `./bot_reminders.json`); rescheduled on startup via `tools.reschedule_reminders()` in on_ready, overdue ones fire immediately.
 [x] Memory storage: migrated JSON -> SQLite + sqlite-vec (binary float32 vectors, zlib-compressed text). More efficient + not plaintext on disk. Verified with a fake embedding; run once against real `nomic-embed-text` on the deployed bot.
+[x] Latency + hallucination fixes: `use_thinking: false` disables the reasoning pass (faster, no reasoning leak); system prompt makes Kronk tool-shy (answer from own knowledge, offer to look up rather than auto-searching, never fabricate); per-channel asyncio lock serializes concurrent messages; tool-announcement messages are excluded from fetched history so the model doesn't "continue" a half-started answer.
+[ ] If double-replies persist after these fixes, suspect TWO bot processes on the host (check `ps aux | grep '[m]ain.py'`) - the per-channel lock only serializes within one process. A single-instance guard was tried once (commit 0393d45) and reverted (91def21).
 [ ] Log channel feature: the user can set a channel for bot logs, and the bot will announce when it's turning on or off.
 [ ] Optional: moderation tools (timeout/role/pin) with a permission/allowlist model - deferred by choice.
 
