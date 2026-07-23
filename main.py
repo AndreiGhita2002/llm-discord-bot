@@ -1,9 +1,10 @@
 import os
 import re
 import sys
-import fcntl
+import signal
 import asyncio
 import random
+import subprocess
 import time
 from datetime import datetime, timezone, timedelta
 import discord
@@ -478,43 +479,55 @@ async def on_message(message: discord.Message):
         await _formulate_and_reply(message, ref_msg)
 
 
-# Keep a reference to the instance-lock file handle for the process's lifetime.
-_instance_lock_handle = None
+def kill_other_instances() -> None:
+    """Newest start wins: terminate any OTHER bot process running from this venv before we
+    connect to Discord.
 
+    This keeps the daemon's 'restart on sleep' reliable - a fresh instance always takes over,
+    and a stale/frozen one can never block it. It also prevents duplicate replies. Critically,
+    we NEVER exit this process here: unlike the old passive flock guard (which made a fresh
+    instance exit when a frozen process still held the lock - suppressing the bot entirely),
+    this only ever kills OTHERS, so the current process always proceeds. Worst case (scan
+    fails) we just carry on and might briefly duplicate.
 
-def acquire_single_instance_lock() -> bool:
-    """Ensure only one bot instance runs from this directory.
-
-    Uses an exclusive advisory flock on a lock file. The OS releases the lock automatically
-    when the holding process dies (even on kill -9), so there's no stale-lock problem - unlike
-    a PID-file check. Returns False if another instance already holds the lock.
-
-    This is the real guard against duplicate replies: the per-channel lock only serializes
-    within one process, but a daemon with flaky process tracking can spawn several. Bots run
-    from different directories use different lock files, so they don't block each other.
+    Matches other processes whose command line contains this bot directory AND main.py (the
+    venv python is invoked as `<bot_dir>/.venv/bin/python3 main.py`), which is exactly the
+    sibling bot processes - not the `uv run` wrapper or bots in other directories.
     """
-    global _instance_lock_handle
-    lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bot.lock")
-    handle = open(lock_path, "w")
+    my_pid = os.getpid()
+    bot_dir = os.path.dirname(os.path.abspath(__file__))
+    pattern = f"{bot_dir}.*main.py"
     try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return False
-    handle.write(str(os.getpid()))
-    handle.flush()
-    _instance_lock_handle = handle  # keep alive so the lock is held
-    return True
+        out = subprocess.run(
+            ["pgrep", "-f", pattern],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as e:
+        print(f"[WARN] could not scan for other instances (continuing anyway): {e}")
+        return
+
+    others = [int(p) for p in out.stdout.split() if p.strip().isdigit() and int(p) != my_pid]
+    for pid in others:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"Terminating older bot instance (pid {pid})")
+        except (ProcessLookupError, PermissionError):
+            pass
+    if others:
+        time.sleep(2)
+        for pid in others:  # force any that ignored SIGTERM (e.g. a frozen process)
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
 
 
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
 
-    # Refuse to start a second instance (prevents duplicate replies from orphaned processes).
-    if not acquire_single_instance_lock():
-        print("Another bot instance is already running (holds .bot.lock); exiting.")
-        sys.exit(0)
+    # Take over from any older/stale instance (never blocks us from starting).
+    kill_other_instances()
 
     #======
     # Init
