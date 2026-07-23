@@ -111,7 +111,7 @@ MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
 # and stops reasoning traces from leaking into replies on reasoning models like qwen3.5.
 MODEL_THINK = CONFIG.get("use_thinking", False)
 # Placeholder shown while the model is thinking (only when MODEL_THINK); deleted once ready.
-THINKING_MESSAGE = CONFIG.get("thinking_message", "🤔 Kronking…")
+THINKING_MESSAGE = CONFIG.get("thinking_message", "🤔 Kronking…") #TODO(config): put in config
 # Hard ceiling (seconds) on any single Ollama request. Prevents the bot from hanging silently
 # forever if Ollama stalls (e.g. the model got evicted while the host slept). On timeout the
 # request is cancelled and the user gets the timeout message instead of dead silence.
@@ -511,15 +511,15 @@ def kill_other_instances() -> None:
         try:
             os.kill(pid, signal.SIGTERM)
             print(f"Terminating older bot instance (pid {pid})")
-        except (ProcessLookupError, PermissionError):
-            pass
+        except (ProcessLookupError, PermissionError) as e:
+            print(f"[WARN] Could not kill other process: {e}")
     if others:
         time.sleep(2)
         for pid in others:  # force any that ignored SIGTERM (e.g. a frozen process)
             try:
                 os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
+            except (ProcessLookupError, PermissionError) as e:
+                print(f"[WARN] Could not kill other process: {e}")
 
 
 if __name__ == "__main__":
