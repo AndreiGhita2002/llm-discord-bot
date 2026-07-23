@@ -29,6 +29,30 @@ def strip_message_prefix(response: str) -> str:
     return response
 
 
+def strip_thinking(response: str) -> str:
+    """Remove any <think>...</think> / <thinking>...</thinking> blocks a model might inline.
+
+    With thinking enabled, Ollama returns the reasoning in a separate `message.thinking` field
+    (which we never post), so content is normally clean. This is a safety net for models that
+    inline the reasoning into content instead - we never want reasoning shown in chat.
+    """
+    if not response:
+        return response
+    cleaned = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", response,
+                     flags=re.DOTALL | re.IGNORECASE)
+    return cleaned.strip()
+
+
+async def _safe_delete(msg) -> None:
+    """Delete a message, ignoring any failure (e.g. already gone / no permission)."""
+    if msg is None:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
 def deep_merge(base: dict, override: dict) -> dict:
     """Deep merge override into base. Override values take precedence."""
     result = base.copy()
@@ -85,6 +109,12 @@ MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
 # Whether the model does its (slow) internal "thinking" pass. Off by default: much faster,
 # and stops reasoning traces from leaking into replies on reasoning models like qwen3.5.
 MODEL_THINK = CONFIG.get("use_thinking", False)
+# Placeholder shown while the model is thinking (only when MODEL_THINK); deleted once ready.
+THINKING_MESSAGE = CONFIG.get("thinking_message", "🤔 Kronking…")
+# Hard ceiling (seconds) on any single Ollama request. Prevents the bot from hanging silently
+# forever if Ollama stalls (e.g. the model got evicted while the host slept). On timeout the
+# request is cancelled and the user gets the timeout message instead of dead silence.
+REQUEST_TIMEOUT = CONFIG.get("request_timeout", 180)
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
@@ -167,16 +197,20 @@ async def fetch_channel_history(channel: discord.TextChannel, limit: int = MESSA
 
 
 async def _model_chat(client: ollama.AsyncClient, **kwargs):
-    """Call ollama chat, passing the configured `think` setting (off by default for speed).
+    """Call ollama chat with the configured `think` setting, bounded by REQUEST_TIMEOUT.
 
-    Falls back to a plain call if the installed client/model doesn't accept `think`, so a
-    non-reasoning model still works.
+    Falls back to a plain call if the client/model doesn't accept `think`. Wrapping in
+    asyncio.wait_for guarantees a hung Ollama call is cancelled instead of blocking forever;
+    the resulting TimeoutError is handled upstream (user sees the timeout message).
     """
-    try:
-        return await client.chat(think=MODEL_THINK, **kwargs)
-    except (TypeError, ollama.ResponseError) as e:
-        print(f"[WARN] 'think' param not accepted ({e}); retrying without it")
-        return await client.chat(**kwargs)
+    async def _call():
+        try:
+            return await client.chat(think=MODEL_THINK, **kwargs)
+        except (TypeError, ollama.ResponseError) as e:
+            print(f"[WARN] 'think' param not accepted ({e}); retrying without it")
+            return await client.chat(**kwargs)
+
+    return await asyncio.wait_for(_call(), timeout=REQUEST_TIMEOUT)
 
 
 async def query_ollama(messages: list[dict], memory_context: str = None,
@@ -191,7 +225,7 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
     `ctx` carries the Discord message/client so tools can act on the server; when None
     (e.g. offline tests) only context-free tools work.
     """
-    ollama_client = ollama.AsyncClient()
+    ollama_client = ollama.AsyncClient(timeout=REQUEST_TIMEOUT)
 
     # Build system prompt with optional memory context
     system_content = SYSTEM_PROMPT
@@ -309,28 +343,49 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
         # Build memory context for this user/channel (must happen before query)
         memory_context = None
         if do_memory:
-            memory_context = memory.build_memory_context(
-                user_id=str(message.author.id),
-                current_message=message.content,
-                channel_id=str(message.channel.id),
-                do_user_memory=do_user_memory,
-                do_conversation_memory=do_conversation_memory,
-            )
+            # Runs a (blocking) embedding call, so offload to a thread - otherwise a slow/hung
+            # Ollama embed would freeze the whole event loop (gateway heartbeat included).
+            try:
+                memory_context = await asyncio.to_thread(
+                    memory.build_memory_context,
+                    user_id=str(message.author.id),
+                    current_message=message.content,
+                    channel_id=str(message.channel.id),
+                    do_user_memory=do_user_memory,
+                    do_conversation_memory=do_conversation_memory,
+                )
+            except Exception as mem_err:
+                print(f"[WARN] Failed to build memory context: {mem_err}")
+
+        # Show a "Kronking..." placeholder while the (slower) thinking pass runs, so a long
+        # delay isn't dead air. Removed once the real reply is ready.
+        thinking_msg = None
+        if MODEL_THINK and THINKING_MESSAGE:
+            try:
+                thinking_msg = await message.channel.send(THINKING_MESSAGE)
+            except Exception:
+                thinking_msg = None
 
         # Query the LLM (ctx lets tools act on the server: react, set status, etc.)
         ctx = ToolContext(message=message, client=client, model=MODEL)
         try:
             response = await query_ollama(messages, memory_context=memory_context, ctx=ctx)
         except TimeoutError:
+            await _safe_delete(thinking_msg)
             await message.reply("The request timed out. Please try again. 🥒")
             return
         except ollama.ResponseError as e:
+            await _safe_delete(thinking_msg)
             await message.reply(f"Error communicating with Ollama: {e} 🥒")
             return
         except Exception as e:
+            await _safe_delete(thinking_msg)
             await message.reply(f"<Weird Error>  🥒")
             print(f"<Weird Error> {e} 🥒")
             return
+
+    # Real reply is ready - clear the "Kronking..." placeholder.
+    await _safe_delete(thinking_msg)
 
     # Failsafe for empty response
     if not response:
@@ -338,7 +393,8 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
         await message.reply("I'm not sure what to say to that. 🥒")
         return
 
-    # Strip input format prefix if model mimics it
+    # Strip any leaked reasoning, then the input-format prefix if the model mimics it
+    response = strip_thinking(response)
     response = strip_message_prefix(response)
 
     # Send the reply first
@@ -355,26 +411,31 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
 
     # Process memory after responding (non-blocking for user experience)
     if do_memory:
-        # Store this conversation for future recall
+        # Store this conversation for future recall. Offloaded to a thread (it runs a blocking
+        # embedding call) so it can't freeze the event loop.
         if do_conversation_memory:
             try:
-                memory.store_conversation(
+                await asyncio.to_thread(
+                    memory.store_conversation,
                     channel_id=str(message.channel.id),
                     messages=messages,
-                    max_conversations=max_stored_conversations
+                    max_conversations=max_stored_conversations,
                 )
             except Exception as mem_err:
                 print(f"[WARN] Failed to store conversation: {mem_err}")
 
-        # Occasionally update user summary
+        # Occasionally update user summary (bounded so a stalled Ollama can't hang here either)
         # TODO: we could use some basic language analysis to determine if the user said anything important
         if do_user_memory and random.random() < USER_SUMMARY_CHANCE:
             try:
-                await memory.generate_user_summary(
-                    user_id=str(message.author.id),
-                    user_name=message.author.display_name,
-                    recent_messages=messages,
-                    model=MODEL
+                await asyncio.wait_for(
+                    memory.generate_user_summary(
+                        user_id=str(message.author.id),
+                        user_name=message.author.display_name,
+                        recent_messages=messages,
+                        model=MODEL,
+                    ),
+                    timeout=REQUEST_TIMEOUT,
                 )
             except Exception as sum_err:
                 print(f"[WARN] Failed to generate user summary: {sum_err}")

@@ -149,10 +149,15 @@ status:
 # Max rounds of tool calls before the bot is forced to give a final answer.
 max_tool_rounds: 5
 
-# Reasoning models (like qwen3.5) do a slow internal "thinking" pass before replying.
-# Off by default: much faster responses, and no reasoning traces leaking into messages.
-# Set true only if you want deeper reasoning and don't mind the latency.
-use_thinking: false
+# Reasoning models (like qwen3.5) do an internal "thinking" pass before replying, which makes
+# them noticeably smarter on complex questions. The reasoning goes in a separate field and is
+# NEVER posted to chat (and any inline <think> tags are stripped as a safety net). While it's
+# thinking, a "Kronking..." placeholder is shown so the delay isn't dead air.
+use_thinking: true
+
+# Placeholder posted while the model is thinking (only used when use_thinking is true). It's
+# deleted once the real reply is ready. Set to "" to show nothing (the typing indicator still runs).
+thinking_message: "🤔 Kronking…"
 
 # Post a short "Looking up X on Wikipedia…" line to the channel before a lookup tool runs,
 # so users know the answer draws from a real/deterministic source. Set false to stay silent.
