@@ -44,5 +44,8 @@ kronk_memory/
 # Persisted reminders
 bot_reminders.json
 
+# Per-server log channel choices
+log_channels.json
+
 # Single-instance lock
 .bot.lock

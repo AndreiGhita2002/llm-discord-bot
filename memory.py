@@ -13,6 +13,7 @@ Needs the `nomic-embed-text` embedding model in Ollama and the `sqlite-vec` pack
 """
 
 import hashlib
+import logging
 import sqlite3
 import struct
 import threading
@@ -22,6 +23,8 @@ from pathlib import Path
 
 import ollama
 import sqlite_vec
+
+log = logging.getLogger("kronk")
 
 # === Storage Setup ===
 
@@ -223,7 +226,7 @@ def store_conversation(
 
     embedding = get_embedding(document)
     if len(embedding) != EMBEDDING_DIM:
-        print(f"[WARN] embedding dim {len(embedding)} != {EMBEDDING_DIM}; skipping store")
+        log.warning(f"embedding dim {len(embedding)} != {EMBEDDING_DIM}; skipping store")
         return
 
     with _lock:

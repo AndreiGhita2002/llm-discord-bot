@@ -13,6 +13,8 @@ import yaml
 
 import memory
 import tools
+import discord_logging as dlog
+from discord_logging import log
 from tools import ToolContext
 
 
@@ -273,13 +275,13 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
                         sent = await ctx.message.channel.send(note)
                         _note_announcement_id(sent.id)  # keep it out of future history
                     except Exception as e:
-                        print(f"[WARN] Could not send tool announcement: {e}")
+                        log.warning(f"Could not send tool announcement: {e}")
 
             try:
                 result = await tools.execute(name, args, ctx or ToolContext())
                 print(f"[DEBUG] Tool {name} returned {len(result)} chars")
             except Exception as e:
-                print(f"[WARN] Tool {name} failed: {e}")
+                log.warning(f"Tool {name} failed: {e}")
                 result = f"Tool error: {e}"
 
             conversation.append({
@@ -289,7 +291,7 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
             })
 
     # Exhausted tool rounds - force a final answer with tools disabled.
-    print(f"[WARN] Hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}); forcing final answer")
+    log.warning(f"Hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}); forcing final answer")
     response = await _model_chat(ollama_client, model=MODEL, messages=conversation)
     return response.message.content
 
@@ -322,6 +324,18 @@ async def on_ready():
         restored = await tools.reschedule_reminders(client)
         if restored:
             print(f"Restored {restored} pending reminder(s)")
+
+        # Start the Discord log-channel flusher (once).
+        client.loop.create_task(dlog.run_flusher(client))
+
+    # Announce we're up (only reaches channels where a log channel has been set).
+    await dlog.notify(client, f"✅ Kronk online as {client.user} — {' | '.join(status_parts) or 'ready'}")
+
+
+@client.event
+async def on_error(event_method: str, *args, **kwargs):
+    """Global handler for uncaught exceptions in event handlers - log with full traceback."""
+    log.exception(f"Unhandled error in {event_method}")
 
 
 async def _formulate_and_reply(message: discord.Message, ref_msg):
@@ -356,7 +370,7 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
                     do_conversation_memory=do_conversation_memory,
                 )
             except Exception as mem_err:
-                print(f"[WARN] Failed to build memory context: {mem_err}")
+                log.warning(f"Failed to build memory context: {mem_err}")
 
         # Show a "Kronking..." placeholder while the (slower) thinking pass runs, so a long
         # delay isn't dead air. Removed once the real reply is ready.
@@ -373,16 +387,18 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
             response = await query_ollama(messages, memory_context=memory_context, ctx=ctx)
         except TimeoutError:
             await _safe_delete(thinking_msg)
+            log.warning(f"Ollama request timed out (>{REQUEST_TIMEOUT}s) for message {message.id}")
             await message.reply("The request timed out. Please try again. 🥒")
             return
         except ollama.ResponseError as e:
             await _safe_delete(thinking_msg)
+            log.error(f"Ollama error: {e}")
             await message.reply(f"Error communicating with Ollama: {e} 🥒")
             return
         except Exception as e:
             await _safe_delete(thinking_msg)
+            log.exception(f"Unexpected error while replying: {e}")
             await message.reply(f"<Weird Error>  🥒")
-            print(f"<Weird Error> {e} 🥒")
             return
 
     # Real reply is ready - clear the "Kronking..." placeholder.
@@ -390,7 +406,7 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
 
     # Failsafe for empty response
     if not response:
-        print(f"[WARN] model generated empty response - user message: {message.content}")
+        log.warning(f"Model generated empty response - user message: {message.content!r}")
         await message.reply("I'm not sure what to say to that. 🥒")
         return
 
@@ -423,7 +439,7 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
                     max_conversations=max_stored_conversations,
                 )
             except Exception as mem_err:
-                print(f"[WARN] Failed to store conversation: {mem_err}")
+                log.warning(f"Failed to store conversation: {mem_err}")
 
         # Occasionally update user summary (bounded so a stalled Ollama can't hang here either)
         # TODO: we could use some basic language analysis to determine if the user said anything important
@@ -439,7 +455,7 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
                     timeout=REQUEST_TIMEOUT,
                 )
             except Exception as sum_err:
-                print(f"[WARN] Failed to generate user summary: {sum_err}")
+                log.warning(f"Failed to generate user summary: {sum_err}")
 
 
 @client.event
@@ -461,6 +477,10 @@ async def on_message(message: discord.Message):
         # Remove oldest entries (set is unordered, but message IDs are snowflakes so roughly ordered)
         oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
         _processed_messages -= set(oldest)
+
+    # Handle our own '/' text commands (e.g. /setlogchannel) before any chat/LLM handling.
+    if await dlog.handle_command(message):
+        return
 
     # fetch the referenced message if it exists:
     ref_msg = None
@@ -526,6 +546,9 @@ if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
 
+    # Set up logging: prints to terminal AND (once a channel is set) forwards WARNING+ to Discord.
+    dlog.init(CONFIG.get("log_channels_file", "./log_channels.json"))
+
     # Take over from any older/stale instance (never blocks us from starting).
     kill_other_instances()
 
@@ -554,4 +577,6 @@ if __name__ == "__main__":
     if (_tools_cfg.get("web_search") or _tools_cfg.get("web_fetch")) and not OLLAMA_API_KEY:
         print("Note: web tools requested but disabled - OLLAMA_API_KEY not set")
 
-    client.run(DISCORD_TOKEN)
+    # log_handler=None: we manage logging ourselves (dlog.init), so discord.py shouldn't add
+    # its own duplicate terminal handler. Its logs still reach our root StreamHandler.
+    client.run(DISCORD_TOKEN, log_handler=None)

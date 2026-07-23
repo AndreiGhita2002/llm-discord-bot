@@ -139,6 +139,11 @@ memory_dir: "./bot_memory"
 # Where pending reminders are persisted (survive restarts; overdue ones fire on next startup)
 reminders_file: "./bot_reminders.json"
 
+# Where per-server log-channel choices are persisted. Admins set a channel with /setlogchannel
+# (default: none, so no logs are posted to Discord until a channel is chosen). Warnings and
+# errors are always printed to the terminal/bot.log regardless.
+log_channels_file: "./log_channels.json"
+
 # Bot status strings (shown as "Playing <text>")
 status:
   memory_enabled: "Kronk remembers"

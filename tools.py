@@ -13,6 +13,7 @@ one `Tool(...)` entry to `_REGISTRY`.
 import ast
 import asyncio
 import json
+import logging
 import operator
 import random
 import time
@@ -29,6 +30,8 @@ import discord
 import ollama
 
 import memory
+
+log = logging.getLogger("kronk")
 
 
 @dataclass
@@ -140,7 +143,7 @@ def _load_reminders() -> list[dict]:
         try:
             return json.loads(_REMINDERS_FILE.read_text())
         except (json.JSONDecodeError, OSError) as e:
-            print(f"[WARN] Could not read reminders file: {e}")
+            log.warning(f"Could not read reminders file: {e}")
     return []
 
 
@@ -149,7 +152,7 @@ def _save_reminders(items: list[dict]) -> None:
         try:
             _REMINDERS_FILE.write_text(json.dumps(items, indent=2))
         except OSError as e:
-            print(f"[WARN] Could not write reminders file: {e}")
+            log.warning(f"Could not write reminders file: {e}")
 
 
 async def _persist_add(record: dict) -> None:
@@ -176,7 +179,7 @@ async def _run_reminder(client: discord.Client, record: dict) -> None:
             channel = await client.fetch_channel(int(record["channel_id"]))
         await channel.send(f"<@{record['user_id']}> ⏰ Reminder: {record['text']}")
     except Exception as e:
-        print(f"[WARN] Reminder {record.get('id')} failed to fire: {e}")
+        log.warning(f"Reminder {record.get('id')} failed to fire: {e}")
     finally:
         await _persist_remove(record["id"])
 
