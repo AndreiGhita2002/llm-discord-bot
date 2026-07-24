@@ -88,7 +88,10 @@ cat > "$BOT_DIR/run-bot.sh" << 'RUNNER_EOF'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BOT_DIR="$SCRIPT_DIR"
 LOG_FILE="$BOT_DIR/logs/bot.log"
-UPDATE_CHECK_INTERVAL="${UPDATE_CHECK_INTERVAL:-300}"
+UPDATE_CHECK_INTERVAL="${UPDATE_CHECK_INTERVAL:-300}"   # how often to check git for updates
+HEALTH_CHECK_INTERVAL="${HEALTH_CHECK_INTERVAL:-15}"    # how often to check the bot is alive+responsive
+HEARTBEAT_FILE="$BOT_DIR/bot.heartbeat"                 # bot rewrites this every few seconds
+HEARTBEAT_MAX_AGE="${HEARTBEAT_MAX_AGE:-90}"            # stale heartbeat older than this = hung -> restart
 BRANCH="${GIT_BRANCH:-main}"
 
 # Ensure logs directory exists
@@ -98,11 +101,47 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# Run a command with a hard timeout so a network stall (git fetch / uv sync) can never wedge
+# the whole guard loop. Uses coreutils timeout/gtimeout when present, else a pure-bash fallback.
+if command -v timeout >/dev/null 2>&1; then _TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then _TIMEOUT_BIN=gtimeout
+else _TIMEOUT_BIN=""; fi
+
+run_timeout() {
+    local secs="$1"; shift
+    if [ -n "$_TIMEOUT_BIN" ]; then
+        "$_TIMEOUT_BIN" "$secs" "$@"
+        return $?
+    fi
+    # Fallback: run in background, kill it if it overruns.
+    "$@" &
+    local cmd_pid=$!
+    ( sleep "$secs"; kill -9 "$cmd_pid" 2>/dev/null ) &
+    local killer=$!
+    wait "$cmd_pid" 2>/dev/null
+    local rc=$?
+    kill "$killer" 2>/dev/null
+    return $rc
+}
+
+# Seconds since the bot last wrote its heartbeat file (echoes a huge number if missing).
+heartbeat_age() {
+    if [ ! -f "$HEARTBEAT_FILE" ]; then echo 999999; return; fi
+    local now hb
+    now=$(date +%s)
+    hb=$(stat -f %m "$HEARTBEAT_FILE" 2>/dev/null || stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null)
+    [ -z "$hb" ] && { echo 999999; return; }
+    echo $(( now - hb ))
+}
+
 check_for_updates() {
     cd "$BOT_DIR"
 
-    # Fetch latest changes from remote
-    git fetch origin "$BRANCH" 2>/dev/null
+    # Fetch latest changes from remote (bounded - a stalled fetch must not wedge the loop).
+    if ! run_timeout 60 git fetch origin "$BRANCH" 2>/dev/null; then
+        log "git fetch timed out or failed; will retry next cycle."
+        return 1
+    fi
 
     # Compare local and remote
     LOCAL=$(git rev-parse HEAD)
@@ -117,19 +156,28 @@ check_for_updates() {
 
 pull_updates() {
     cd "$BOT_DIR"
-    log "Pulling latest changes..."
-    git pull origin "$BRANCH"
+    log "Applying latest changes (hard reset to origin/$BRANCH)..."
+    # Hard reset instead of 'git pull': a dirty tree or diverged local commit can never block a
+    # deploy/reset. Runtime files (heartbeat, pid, logs, config.yaml) are gitignored, so nothing
+    # of value is discarded. This is what makes the 'push .deploy-trigger to force a reset' work
+    # reliably every time.
+    run_timeout 60 git fetch origin "$BRANCH" 2>/dev/null
+    git reset --hard "origin/$BRANCH"
 
-    # Reinstall dependencies if pyproject.toml changed
-    if git diff HEAD~1 --name-only | grep -q "pyproject.toml\|uv.lock"; then
+    # Reinstall dependencies if they changed in the new revision.
+    if git diff HEAD@{1} HEAD --name-only 2>/dev/null | grep -q "pyproject.toml\|uv.lock"; then
         log "Dependencies changed, running uv sync..."
-        uv sync
+        run_timeout 300 uv sync
     fi
 }
 
 run_bot() {
     cd "$BOT_DIR"
     log "Starting bot..."
+
+    # Remove any stale heartbeat from a previous run so the new process gets a clean grace
+    # period (an absent heartbeat is treated as 'starting up', not 'hung') until it writes one.
+    rm -f "$HEARTBEAT_FILE"
 
     # Run the bot using uv. Redirect straight to the log file (NO 'tee' pipe) so $! is the
     # uv/python pid, not a pipeline wrapper - otherwise stop_bot kills the wrong process and
@@ -176,28 +224,54 @@ log "Bot directory: $BOT_DIR"
 log "Branch: $BRANCH"
 log "Update check interval: ${UPDATE_CHECK_INTERVAL}s"
 
+# True if the bot process is both alive AND responsive (heartbeat fresh).
+bot_is_healthy() {
+    # Dead / no pid file?
+    if [ ! -f "$BOT_DIR/bot.pid" ]; then return 1; fi
+    local pid
+    pid=$(cat "$BOT_DIR/bot.pid")
+    if ! kill -0 "$pid" 2>/dev/null; then
+        log "Bot process (PID $pid) is not running."
+        return 1
+    fi
+    # Alive but hung? Stale heartbeat means the event loop is wedged. Only judge staleness once
+    # the bot has written a heartbeat at least once (fresh starts get a grace period until then).
+    if [ -f "$HEARTBEAT_FILE" ]; then
+        local age
+        age=$(heartbeat_age)
+        if [ "$age" -gt "$HEARTBEAT_MAX_AGE" ]; then
+            log "Bot heartbeat stale (${age}s > ${HEARTBEAT_MAX_AGE}s) - loop is hung."
+            return 1
+        fi
+    fi
+    return 0
+}
+
 # Initial start
 run_bot
 
-# Update check loop
+# Guard loop: fast health checks (dead OR hung) on every tick; slower update checks.
+SECONDS_SINCE_UPDATE_CHECK=0
 while true; do
-    sleep "$UPDATE_CHECK_INTERVAL"
+    sleep "$HEALTH_CHECK_INTERVAL"
+    SECONDS_SINCE_UPDATE_CHECK=$((SECONDS_SINCE_UPDATE_CHECK + HEALTH_CHECK_INTERVAL))
 
-    # Check if bot is still running
-    if [ -f "$BOT_DIR/bot.pid" ]; then
-        PID=$(cat "$BOT_DIR/bot.pid")
-        if ! kill -0 "$PID" 2>/dev/null; then
-            log "Bot process died, restarting..."
-            run_bot
-            continue
-        fi
+    # 1) Health: restart a dead or hung bot immediately.
+    if ! bot_is_healthy; then
+        log "Bot unhealthy - restarting."
+        stop_bot
+        run_bot
+        continue
     fi
 
-    # Check for updates
-    if check_for_updates; then
-        stop_bot
-        pull_updates
-        run_bot
+    # 2) Updates: only every UPDATE_CHECK_INTERVAL seconds.
+    if [ "$SECONDS_SINCE_UPDATE_CHECK" -ge "$UPDATE_CHECK_INTERVAL" ]; then
+        SECONDS_SINCE_UPDATE_CHECK=0
+        if check_for_updates; then
+            stop_bot
+            pull_updates
+            run_bot
+        fi
     fi
 done
 RUNNER_EOF

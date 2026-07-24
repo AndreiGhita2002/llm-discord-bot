@@ -49,3 +49,10 @@ log_channels.json
 
 # Single-instance lock
 .bot.lock
+
+# Watchdog / daemon runtime files
+bot.heartbeat
+bot.pid
+run-bot.sh
+logs/
+.bot_version

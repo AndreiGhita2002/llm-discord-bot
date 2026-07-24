@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import operator
+import os
 import random
 import time
 import urllib.parse
@@ -69,20 +70,48 @@ def _fn(name: str, description: str, properties: dict, required: list[str]) -> d
 # Web tools (require OLLAMA_API_KEY; the search/fetch runs on Ollama's cloud)
 # ======================================================================================
 
+# Hard ceiling (seconds) on any single blocking Ollama-cloud web call. These use the SYNC
+# ollama client, so they MUST be offloaded to a thread and bounded - otherwise a stalled cloud
+# request blocks the whole asyncio event loop (Discord heartbeat included) and the bot wedges.
+WEB_TIMEOUT = 60
+
+
+def _no_web_key() -> Optional[str]:
+    """Return a friendly message if the Ollama cloud key is missing (web tools can't run).
+
+    The tools are normally gated off entirely without a key, but this is a belt-and-braces
+    guard so a mis-config (tool enabled, key absent) degrades to a clear message instead of a
+    raw error or a stall. Safe to leave the tool 'on' in config for when a key is added later.
+    """
+    if not os.environ.get("OLLAMA_API_KEY"):
+        return "Web access isn't available right now (no Ollama API key configured)."
+    return None
+
+
 async def _web_search(args: dict, ctx: ToolContext) -> str:
+    if (msg := _no_web_key()):
+        return msg
     query = args["query"]
     print(f"[TOOL] web_search: {query}")
-    result = ollama.web_search(query)
+    # ollama.web_search is synchronous + blocking: run it off the event loop, with a timeout.
+    result = await asyncio.wait_for(
+        asyncio.to_thread(ollama.web_search, query), timeout=WEB_TIMEOUT
+    )
     return f"Web search results for '{query}':\n{result}"
 
 
 async def _web_fetch(args: dict, ctx: ToolContext) -> str:
+    if (msg := _no_web_key()):
+        return msg
     url = args["url"]
     if not url.startswith(("http://", "https://")):
         print(f"[TOOL] web_fetch: invalid URL '{url}' (skipped)")
         return f"Invalid URL: {url} (must start with http:// or https://)"
     print(f"[TOOL] web_fetch: {url}")
-    result = ollama.web_fetch(url)
+    # ollama.web_fetch is synchronous + blocking: run it off the event loop, with a timeout.
+    result = await asyncio.wait_for(
+        asyncio.to_thread(ollama.web_fetch, url), timeout=WEB_TIMEOUT
+    )
     return f"Contents of {url}:\n{result}"
 
 

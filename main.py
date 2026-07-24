@@ -5,7 +5,9 @@ import signal
 import asyncio
 import random
 import subprocess
+import threading
 import time
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import discord
 import ollama
@@ -118,6 +120,21 @@ THINKING_MESSAGE = CONFIG.get("thinking_message", "🤔 Kronking…") #TODO(conf
 # forever if Ollama stalls (e.g. the model got evicted while the host slept). On timeout the
 # request is cancelled and the user gets the timeout message instead of dead silence.
 REQUEST_TIMEOUT = CONFIG.get("request_timeout", 180)
+# --- Self-recovery watchdog ---------------------------------------------------------------
+# A background OS thread checks that the asyncio event loop is still advancing. An async task
+# bumps a heartbeat every few seconds; if it stops advancing for WATCHDOG_TIMEOUT seconds the
+# loop is wedged (e.g. a blocking call froze it, or the gateway deadlocked), so the watchdog
+# force-exits the process. The daemon (run-bot.sh / launchd KeepAlive) then starts a fresh one.
+# Because it's a plain thread, it keeps running even when the event loop is fully blocked.
+# The heartbeat is ALSO written to a file so the external daemon has an independent liveness
+# signal (covers the rare case where even the watchdog thread is starved).
+WATCHDOG_TIMEOUT = CONFIG.get("watchdog_timeout", 120)  # secs of stall before self-exit
+WATCHDOG_INTERVAL = CONFIG.get("watchdog_interval", 15)  # how often the thread checks
+HEARTBEAT_FILE = Path(CONFIG.get("heartbeat_file", "./bot.heartbeat"))
+_heartbeat_ts = time.time()  # last time the event loop proved it was alive
+# Records the git commit the bot last started on, so on the next start we can tell whether the
+# code actually changed (a deploy) versus a plain crash-recovery restart - and announce it.
+VERSION_FILE = Path(CONFIG.get("version_file", "./.bot_version"))
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
@@ -150,6 +167,75 @@ def _note_announcement_id(msg_id: int) -> None:
     if len(_announcement_message_ids) > _announcement_ids_max:
         for old in sorted(_announcement_message_ids)[:_announcement_ids_max // 2]:
             _announcement_message_ids.discard(old)
+
+
+async def _heartbeat_loop() -> None:
+    """Bump the in-memory heartbeat (and touch the heartbeat file) while the loop is healthy.
+
+    Runs as an asyncio task, so if the event loop is blocked this stops advancing - which is
+    exactly the signal the watchdog thread and the external daemon watch for.
+    """
+    global _heartbeat_ts
+    while True:
+        _heartbeat_ts = time.time()
+        try:
+            HEARTBEAT_FILE.write_text(str(_heartbeat_ts))
+        except Exception:
+            pass  # a failed heartbeat write must never take the bot down
+        await asyncio.sleep(5)
+
+
+def _watchdog_thread() -> None:
+    """Force-exit the process if the event loop stops advancing (self-recovery).
+
+    Plain OS thread so it runs even when the loop is wedged. os._exit skips cleanup on purpose:
+    the loop is presumed dead, so we bail hard and let the daemon restart a clean process.
+    """
+    while True:
+        time.sleep(WATCHDOG_INTERVAL)
+        stalled = time.time() - _heartbeat_ts
+        if stalled > WATCHDOG_TIMEOUT:
+            print(
+                f"[WATCHDOG] event loop unresponsive for {stalled:.0f}s "
+                f"(> {WATCHDOG_TIMEOUT}s); force-exiting for a clean restart",
+                file=sys.stderr, flush=True,
+            )
+            os._exit(1)
+
+
+def _current_commit() -> str | None:
+    """Return the short git SHA the bot is running from, or None if unavailable."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        return out.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _check_version_change() -> tuple[str | None, str | None]:
+    """Return (current_sha, previous_sha) and persist the current one for the next start.
+
+    previous_sha is what the bot ran on last time it started; if it differs from current, the
+    code was updated between runs (a deploy). Reconnects re-read the now-persisted value, so
+    the 'updated' announcement fires only once per actual change.
+    """
+    current = _current_commit()
+    previous = None
+    try:
+        if VERSION_FILE.exists():
+            previous = VERSION_FILE.read_text().strip() or None
+    except Exception:
+        previous = None
+    if current:
+        try:
+            VERSION_FILE.write_text(current)
+        except Exception:
+            pass
+    return current, previous
 
 
 def _get_channel_lock(channel_id: int) -> asyncio.Lock:
@@ -328,8 +414,22 @@ async def on_ready():
         # Start the Discord log-channel flusher (once).
         client.loop.create_task(dlog.run_flusher(client))
 
-    # Announce we're up (only reaches channels where a log channel has been set).
-    await dlog.notify(client, f"✅ Kronk online as {client.user} — {' | '.join(status_parts) or 'ready'}")
+        # Start the heartbeat task the watchdog/daemon watch for liveness (once).
+        client.loop.create_task(_heartbeat_loop())
+
+    # Announce we're up (only reaches channels where a log channel has been set). If the code
+    # changed since the last start, say "updated" instead of the plain "online" line.
+    base = " | ".join(status_parts) or "ready"
+    current_sha, previous_sha = _check_version_change()
+    if current_sha and previous_sha is None:
+        # First run since version tracking was added - mark it as the baseline deployment.
+        announce = f"🎉 Kronk deployed with self-recovery! Baseline `{current_sha}` — {base}"
+    elif current_sha and previous_sha and current_sha != previous_sha:
+        announce = f"🔄 Kronk updated! Now on `{current_sha}` (was `{previous_sha}`) — {base}"
+    else:
+        suffix = f" `{current_sha}`" if current_sha else ""
+        announce = f"✅ Kronk online as {client.user} — {base}{suffix}"
+    await dlog.notify(client, announce)
 
 
 @client.event
@@ -551,6 +651,11 @@ if __name__ == "__main__":
 
     # Take over from any older/stale instance (never blocks us from starting).
     kill_other_instances()
+
+    # Start the self-recovery watchdog: if the event loop ever wedges, force-exit so the
+    # daemon restarts a fresh process. Daemon thread so it never blocks interpreter shutdown.
+    _heartbeat_ts = time.time()
+    threading.Thread(target=_watchdog_thread, name="watchdog", daemon=True).start()
 
     #======
     # Init
