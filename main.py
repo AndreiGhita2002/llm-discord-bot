@@ -9,6 +9,8 @@ import threading
 import time
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
+
 import discord
 import ollama
 import yaml
@@ -388,6 +390,10 @@ async def on_ready():
     # Replace Discord-specific placeholders now that we have bot info
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_display_name}}", client.user.display_name)
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_user_id}}", str(client.user.id))
+    default_timezone = CONFIG.get('default_timezone', 'Europe/London')
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{time_zone}}", default_timezone)
+    datetime_now = datetime.now(ZoneInfo(default_timezone)).strftime('%a %d %b %Y, %I:%M%p')
+    SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{date_time}}", datetime_now)
     print(f"Logged in as {client.user}")
 
     # Set bot status based on enabled features

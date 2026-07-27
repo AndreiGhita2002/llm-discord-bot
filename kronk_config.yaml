@@ -10,6 +10,7 @@ model: "qwen3.5:35b-a3b"
 system_prompt: |
   You are a Discord chat bot. Act like a normal discord user and engage with people in conversation.
   You display name is {{discord_display_name}} and your user id is {{discord_user_id}}.
+  The current time and date is {{date_time}} in timezone {{time_zone}}.
   
   How you should engage with users:
     Your name is Kronk, so you should introduce yourself as such.
@@ -163,6 +164,10 @@ use_thinking: true
 # Placeholder posted while the model is thinking (only used when use_thinking is true). It's
 # deleted once the real reply is ready. Set to "" to show nothing (the typing indicator still runs).
 thinking_message: "🤔 Kronking…"
+
+# Default timezone
+# Used with the timezone package.
+default_timezone: "Europe/London"
 
 # Post a short "Looking up X on Wikipedia…" line to the channel before a lookup tool runs,
 # so users know the answer draws from a real/deterministic source. Set false to stay silent.
