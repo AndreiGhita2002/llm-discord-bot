@@ -93,7 +93,7 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
         "🔎 Looking up “{query}” on YouTube…",
         "🔎 One sec, digging up “{query}”…",
     ],
-    "now_playing": [
+    "now_playing": [ #TODO: add the video link to the titles
         "🎶 Now playing: **{title}** [{duration}] — for {user}",
         "🎶 Here we go — **{title}** [{duration}], requested by {user}",
     ],

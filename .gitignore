@@ -56,3 +56,5 @@ bot.pid
 run-bot.sh
 logs/
 .bot_version
+
+.claude
