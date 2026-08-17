@@ -183,11 +183,13 @@ voice:
     searching:
       - "🔎 Ooh, music! Diggin' up “{query}” on the ol' YouTube…"
       - "🔎 Say no more! Huntin' down “{query}”…"
+    # {link} = the title, clickable through to the video. {title} is still available as plain
+    # text if you'd rather not link.
     now_playing:
-      - "🎶 Now spinnin': **{title}** [{duration}] — for {user}. Kronk-tacular choice!"
-      - "🎶 Here we go! **{title}** [{duration}], picked by {user}."
+      - "🎶 Now spinnin': **{link}** [{duration}] — for {user}. Kronk-tacular choice!"
+      - "🎶 Here we go! **{link}** [{duration}], picked by {user}."
     queued:
-      - "➕ Lined up **{title}** [{duration}] — you're #{position}. Patience, my friend."
+      - "➕ Lined up **{link}** [{duration}] — you're #{position}. Patience, my friend."
     skipped:
       - "⏭️ Yeah okay, **{title}** wasn't it. Movin' on!"
     stopped:

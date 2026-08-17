@@ -202,6 +202,11 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **Track titles link to the video**: "Now playing", "Queued", `/np` and `/queue` now render the
+  title as a hyperlink to the YouTube page instead of showing a bare URL (or none at all).
+  Templates get a `{link}` placeholder alongside the existing plain `{title}`, so persona configs
+  written before this still render as they did. Preview cards are suppressed, so a ten-track
+  `/queue` stays one message instead of ten embeds.
 - **Voice fixed: E2EE (DAVE) is now mandatory.** The bot would join a voice channel, sit there
   for a few seconds and leave without playing anything — the voice gateway was closing every
   handshake with code 4017. Discord enforced its DAVE end-to-end-encryption protocol on

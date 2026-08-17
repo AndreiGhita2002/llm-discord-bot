@@ -103,12 +103,14 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
         "🔎 Looking up “{query}” on YouTube…",
         "🔎 One sec, digging up “{query}”…",
     ],
-    "now_playing": [ #TODO: add the video link to the titles
-        "🎶 Now playing: **{title}** [{duration}] — for {user}",
-        "🎶 Here we go — **{title}** [{duration}], requested by {user}",
+    # `{link}` is the title as a clickable link to the video; `{title}` is still passed as plain
+    # text, so a persona config written before links existed renders exactly as it used to.
+    "now_playing": [
+        "🎶 Now playing: **{link}** [{duration}] — for {user}",
+        "🎶 Here we go — **{link}** [{duration}], requested by {user}",
     ],
     "queued": [
-        "➕ Queued **{title}** [{duration}] — #{position} in line.",
+        "➕ Queued **{link}** [{duration}] — #{position} in line.",
     ],
     "skipped": [
         "⏭️ Skipped **{title}**.",
@@ -148,6 +150,26 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
 }
 
 _messages: dict[str, list[str]] = {k: list(v) for k, v in DEFAULT_MESSAGES.items()}
+
+
+# Everything Discord treats as formatting, escaped in ONE pass. discord.utils.escape_markdown
+# would be the obvious choice but it leaves brackets alone except when it thinks it sees a link,
+# so escaping those separately double-escapes exactly the titles that need it most - and
+# "[Official Music Video]" is about as common as YouTube titles get.
+_MD_SPECIALS = re.compile(r"([\\`*_~|\[\]])")
+
+
+def _link(title: str, url: str) -> str:
+    """A track title as a clickable masked link, or the bare title when there's no URL.
+
+    Discord renders `[text](url)` in messages posted by bots (unlike messages from users), so
+    the title itself can be the link instead of dangling a raw URL after it. Unescaped brackets
+    in the label would close the link early and leave the URL sitting there as visible text.
+    """
+    label = _MD_SPECIALS.sub(r"\\\1", (title or "").strip())
+    if not label:
+        return url or ""
+    return f"[{label}]({url})" if url else label
 
 
 class _SafeDict(dict):
@@ -393,7 +415,9 @@ class GuildPlayer:
         if not text or self.text_channel is None:
             return
         try:
-            await self.text_channel.send(text)
+            # suppress_embeds: the title is a link now, and a preview card per track would
+            # swamp the channel.
+            await self.text_channel.send(text, suppress_embeds=True)
         except Exception as e:
             log.warning(f"Could not post voice status: {e}")
 
@@ -522,6 +546,7 @@ class GuildPlayer:
         await self._announce(_say(
             "now_playing",
             title=track.title,
+            link=_link(track.title, track.webpage_url),
             duration=_format_duration(track.duration),
             user=track.requested_by,
             url=track.webpage_url,
@@ -663,6 +688,7 @@ async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -
         await _edit_or_send(status, message, _say(
             "queued",
             title=track.title,
+            link=_link(track.title, track.webpage_url),
             duration=_format_duration(track.duration),
             position=position,
             url=track.webpage_url,
@@ -675,15 +701,24 @@ async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -
             pass
 
 
+async def _reply(message: discord.Message, text: str):
+    """Reply without letting the linked videos unfurl into preview cards.
+
+    Now that every track line carries a link, a `/queue` listing would otherwise drag ten
+    YouTube cards into the channel behind it.
+    """
+    return await message.reply(text, suppress_embeds=True)
+
+
 async def _edit_or_send(status, message: discord.Message, text: str) -> None:
     """Update the '🔎 searching…' placeholder if we still have it, else just reply."""
     if status is not None:
         try:
-            await status.edit(content=text)
+            await status.edit(content=text, suppress=True)
             return
         except Exception:
             pass
-    await message.reply(text)
+    await _reply(message, text)
 
 
 async def _cmd_skip(message: discord.Message, player: GuildPlayer) -> None:
@@ -718,15 +753,17 @@ async def _cmd_leave(message: discord.Message, player: GuildPlayer) -> None:
 async def _cmd_queue(message: discord.Message, player: GuildPlayer) -> None:
     lines = []
     if player.current:
-        lines.append(f"▶️ **{player.current.title}** [{_format_duration(player.current.duration)}]")
+        cur = player.current
+        lines.append(f"▶️ **{_link(cur.title, cur.webpage_url)}** [{_format_duration(cur.duration)}]")
     for i, track in enumerate(player.queue[:10], start=1):
-        lines.append(f"{i}. {track.title} [{_format_duration(track.duration)}] — {track.requested_by}")
+        lines.append(f"{i}. {_link(track.title, track.webpage_url)} "
+                     f"[{_format_duration(track.duration)}] — {track.requested_by}")
     if len(player.queue) > 10:
         lines.append(f"…and {len(player.queue) - 10} more.")
     if not lines:
         await message.reply(_say("nothing_playing"))
         return
-    await message.reply("\n".join(lines)[:1900])
+    await _reply(message, "\n".join(lines)[:1900])
 
 
 async def _cmd_nowplaying(message: discord.Message, player: GuildPlayer) -> None:
@@ -734,9 +771,10 @@ async def _cmd_nowplaying(message: discord.Message, player: GuildPlayer) -> None
     if track is None:
         await message.reply(_say("nothing_playing"))
         return
-    await message.reply(
-        f"🎶 **{track.title}** [{_format_duration(track.duration)}] "
-        f"— requested by {track.requested_by}\n{track.webpage_url}"
+    await _reply(
+        message,
+        f"🎶 **{_link(track.title, track.webpage_url)}** [{_format_duration(track.duration)}] "
+        f"— requested by {track.requested_by}"
     )
 
 

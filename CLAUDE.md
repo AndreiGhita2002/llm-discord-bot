@@ -221,6 +221,15 @@ the original 4017 outage logged as `Could not join voice channel 123:` with an e
 announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides in the
 `voice.messages:` config block, one variant picked at random.
 
+Track titles are clickable: `{link}` renders `[title](video url)` via `_link()`, which Discord
+shows as a hyperlink because the message comes from a bot. `{title}` is still passed as plain
+text, so a persona config written before links existed renders unchanged. `_link()` escapes the
+label in **one** pass (`_MD_SPECIALS`) rather than using `discord.utils.escape_markdown` - that
+helper skips brackets except when it thinks it sees a link, so escaping them afterwards
+double-escapes precisely the "[Official Music Video]" titles that need it. Everything that posts
+a link sends with `suppress_embeds=True` (`_reply`, `_announce`, `_edit_or_send`), otherwise a
+`/queue` listing would unfurl ten YouTube preview cards.
+
 ## Known Issues / TODOs
 
 [x] Websearch: migrated from two-model hack to single-model native tool-calling loop (smoke-tested with llama3.1:8b; verify web_search/web_fetch on the deployed qwen3.5 model with a real OLLAMA_API_KEY).
