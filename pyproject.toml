@@ -5,13 +5,17 @@ description = "LLM based discord bot. Optimised for entartained and mimicking hu
 requires-python = ">=3.12"
 
 dependencies = [
-    "discord.py>=2.3.0",
+    # The [voice] extra is REQUIRED, not optional polish: since Discord enforced the DAVE
+    # end-to-end-encryption protocol (2 March 2026) the voice gateway rejects any client that
+    # can't do E2EE with close code 4017, so the bot joins and is kicked straight back out.
+    # The extra pulls `davey` (the DAVE implementation) alongside PyNaCl, which it pins <1.6.
+    # Needs discord.py >= 2.7.0, the first release with DAVE support.
+    "discord.py[voice]>=2.7.0",
     "httpx>=0.27.0",
     "ollama>=0.4.0",
     "pyyaml>=6.0",
     "sqlite-vec>=0.1.0",
-    # Voice playback (/play): PyNaCl encrypts the voice stream, yt-dlp resolves YouTube audio.
-    # The ffmpeg binary and libopus are system deps (macOS: `brew install ffmpeg`).
-    "PyNaCl>=1.5.0",
+    # Voice playback (/play): yt-dlp resolves YouTube audio. The ffmpeg binary and libopus are
+    # system deps (macOS: `brew install ffmpeg`).
     "yt-dlp>=2024.8.6",
 ]

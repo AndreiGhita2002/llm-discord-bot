@@ -21,7 +21,8 @@ loop (the bot has been bitten by exactly that before, see the web tools in tools
 State is per-guild (`GuildPlayer`): a queue plus one background task that plays tracks in
 order and disconnects after `idle_timeout` seconds with nothing to play.
 
-Requirements: `yt-dlp` + `PyNaCl` (pip, see pyproject) and `ffmpeg` + `libopus` (system).
+Requirements: `yt-dlp` + `discord.py[voice]` (brings `PyNaCl` and `davey`, see pyproject) and
+`ffmpeg` + `libopus` (system). `davey` is required, not optional - see `_HAS_DAVE` below.
 Each is checked at startup and again per command, so a missing piece degrades to a clear
 message in chat instead of a traceback.
 """
@@ -49,6 +50,15 @@ try:  # discord.py needs PyNaCl to encrypt the voice stream
     _HAS_NACL = True
 except ImportError:  # pragma: no cover
     _HAS_NACL = False
+
+try:  # DAVE (end-to-end encryption) - mandatory since Discord enforced it on 2026-03-02.
+    # Without it the voice gateway closes the handshake with code 4017 and the bot appears to
+    # join for a few seconds and then leave, with no audio. Checked here so that shows up as a
+    # startup line and a chat message instead of a silent retry loop in the log.
+    import davey  # noqa: F401
+    _HAS_DAVE = True
+except ImportError:  # pragma: no cover
+    _HAS_DAVE = False
 
 
 # === Config (set by configure()) ===
@@ -202,6 +212,9 @@ def _unavailable_reason() -> Optional[str]:
         return "the yt-dlp package isn't installed (`uv sync`)"
     if not _HAS_NACL:
         return "PyNaCl isn't installed, so I can't send voice audio (`uv sync`)"
+    if not _HAS_DAVE:
+        return ("the `davey` package isn't installed, so I can't do Discord's mandatory voice "
+                "encryption - install the voice extra (`uv sync`, needs discord.py[voice])")
     if shutil.which(FFMPEG_PATH) is None:
         return f"ffmpeg isn't installed (looked for '{FFMPEG_PATH}')"
     return None
@@ -230,6 +243,26 @@ def _ensure_opus() -> None:
         except Exception:
             continue
     log.warning("Could not load libopus; voice playback may fail")
+
+
+def _connect_failure_detail(exc: BaseException) -> str:
+    """Explain a failed voice connect in words.
+
+    Worth the helper because the two exceptions that actually show up here stringify to
+    something useless: discord.py raises a bare `asyncio.TimeoutError` once its internal retries
+    are exhausted (empty message - this is why a real gateway rejection was logged as
+    "Could not join voice channel 123: " with nothing after the colon), and `ConnectionClosed`
+    puts the interesting part in `.code` rather than the text.
+    """
+    code = getattr(exc, "code", None)
+    if code == 4017:
+        return ("Discord requires end-to-end encrypted voice (DAVE, close code 4017) and I "
+                "can't do it - the `davey` package is missing, run `uv sync`")
+    if code is not None:
+        return f"the voice gateway closed the connection (code {code})"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "the voice handshake timed out"
+    return str(exc).strip() or exc.__class__.__name__
 
 
 # === Track resolution (yt-dlp) ===
@@ -616,8 +649,9 @@ async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -
         await _edit_or_send(status, message, str(e))
         return
     except Exception as e:
-        log.warning(f"Could not join voice channel {channel.id}: {e}")
-        await _edit_or_send(status, message, f"I couldn't join {channel.name}: {e}")
+        detail = _connect_failure_detail(e)
+        log.warning(f"Could not join voice channel {channel.id}: {detail}")
+        await _edit_or_send(status, message, f"I couldn't join {channel.name}: {detail}")
         return
 
     position = player.enqueue(track)
