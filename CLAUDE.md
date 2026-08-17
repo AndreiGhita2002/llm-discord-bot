@@ -32,6 +32,7 @@ All Python code lives in `src/`; configs, scripts and runtime state live in the 
 - `pyproject.toml` - Dependencies (uses uv)
 - `setup-daemon-mac.sh` - macOS daemon setup script
 - `setup-memory.sh` - Initializes memory directory and pulls embedding model
+- `kill-bot.py` - Stops the bot at every layer (launchd agent, run-bot.sh guard, bot process)
 - `bot_memory/` - Holds `memory.db` (SQLite + sqlite-vec: user summaries + conversation embeddings), created on first run (gitignored)
 - `bot_reminders.json` - Persisted pending reminders, rescheduled on startup (gitignored)
 

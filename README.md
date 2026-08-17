@@ -154,6 +154,23 @@ Use the included script to set up the bot as a launchd daemon:
 ./setup-daemon-mac.sh
 ```
 
+### Stopping the bot
+
+`kill-bot.py` stops the bot at every layer. This matters because the layers restart each
+other: the launchd agent restarts `run-bot.sh`, which restarts the bot within ~15 seconds if
+it looks dead or hung — so killing the Python process alone just brings it back.
+
+```bash
+./kill-bot.py                 # stop the bot AND unload the daemon
+./kill-bot.py --keep-daemon   # kill just the bot; the guard restarts it (i.e. a restart)
+./kill-bot.py --dry-run       # show what would be killed
+./kill-bot.py --all           # also hunt bot processes from other checkouts (asks first)
+```
+
+It's stdlib-only, so it still works if the venv is broken. It matches both the current
+(`src/main.py`) and older (`main.py` at the root) layouts, cleans up the stale `bot.pid` and
+`bot.heartbeat`, and exits non-zero if anything survived.
+
 ## Usage
 
 - **@mention** the bot to get a response
@@ -164,6 +181,10 @@ Use the included script to set up the bot as a launchd daemon:
 
 ### v0.2.3
 
+- **`kill-bot.py`**: stops the bot at every layer (launchd agent → `run-bot.sh` guard → bot
+  process), so it stays stopped instead of being restarted by the layer above. `--keep-daemon`
+  turns it into a restart, `--dry-run` shows what it would kill. Stdlib-only, so it works even
+  if the venv is broken.
 - **Source moved to `src/`**: all Python modules now live in `src/`, with configs, scripts and
   runtime state (memory db, reminders, heartbeat, logs) staying in the project root. The entry
   point is `uv run python src/main.py`. Config paths are now resolved relative to the project
