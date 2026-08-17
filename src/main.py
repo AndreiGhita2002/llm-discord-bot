@@ -600,6 +600,44 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
                 log.warning(f"Failed to generate user summary: {sum_err}")
 
 
+# === !help ===================================================================================
+# Each feature module owns its own COMMAND_HELP list (next to the regex that implements those
+# commands, so they can't drift); this just renders them. Adding a command means adding one
+# entry to its module's list, not touching this function.
+# Anchored at the end (like the /setlogchannel commands) so "!help me pick a song" reaches the
+# LLM as a normal question instead of being swallowed and answered with a command list.
+_HELP_RE = re.compile(r"^!help\s*$", re.IGNORECASE)
+
+
+def _format_help_section(title: str, entries: list[tuple[str, str]], note: str = "") -> list[str]:
+    lines = [f"**{title}**" + (f" — {note}" if note else "")]
+    lines += [f"`{usage}` — {description}" for usage, description in entries]
+    return lines + [""]
+
+
+async def handle_help_command(message: discord.Message) -> bool:
+    """Answer !help with the full command list. Returns True if it consumed the message.
+
+    Voice commands are listed even when playback is unavailable, with the reason attached -
+    saying nothing at all would just look like the feature doesn't exist.
+    """
+    if not _HELP_RE.match((message.content or "").strip()):
+        return False
+
+    lines = [f"**Here's what I can do** 🥒", ""]
+    lines += _format_help_section("Music", voice.COMMAND_HELP,
+                                  note="" if VOICE_READY else f"unavailable: {voice.unavailable_reason()}")
+    lines += _format_help_section("Server admin", dlog.COMMAND_HELP,
+                                  note="needs the Manage Server permission")
+    lines += _format_help_section("Chat", [
+        (f"@{client.user.display_name} <message>", "Talk to me - I reply to mentions"),
+        ("(reply to me)", "Reply to any of my messages to keep the conversation going"),
+        ("!help", "Show this list"),
+    ])
+    await message.reply("\n".join(lines).strip()[:2000])
+    return True
+
+
 @client.event
 async def on_message(message: discord.Message):
     global _processed_messages
@@ -620,7 +658,9 @@ async def on_message(message: discord.Message):
         oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
         _processed_messages -= set(oldest)
 
-    # Handle our own text commands (/setlogchannel, !play) before any chat/LLM handling.
+    # Handle our own text commands (!help, /setlogchannel, !play) before any chat/LLM handling.
+    if await handle_help_command(message):
+        return
     if await dlog.handle_command(message):
         return
     if await voice.handle_command(message):

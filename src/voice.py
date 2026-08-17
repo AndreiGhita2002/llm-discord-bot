@@ -219,6 +219,25 @@ def _unavailable_reason() -> Optional[str]:
     return None
 
 
+def unavailable_reason() -> Optional[str]:
+    """Public wrapper for the capability check, so !help can explain why voice is off."""
+    return _unavailable_reason()
+
+
+# Help text for !help, kept right here next to the regex that implements these commands so the
+# two can't drift apart. main.py renders it; see the "standardise the command set" TODO for the
+# eventual shared dispatcher.
+COMMAND_HELP: list[tuple[str, str]] = [
+    ("!play <song or url>", "Join your voice channel and play the top YouTube result"),
+    ("!skip", "Skip the current track"),
+    ("!stop", "Stop playing and clear the queue"),
+    ("!leave", "Stop and leave the voice channel"),
+    ("!queue", "Show what's lined up"),
+    ("!np", "Show what's playing right now"),
+    ("!pause / !resume", "Pause or resume playback"),
+]
+
+
 # libopus ships with ffmpeg's brew formula but isn't always on the loader path that
 # discord.py's autodetect searches, so try the usual homebrew/linux locations before giving up.
 _OPUS_CANDIDATES = (

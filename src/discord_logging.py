@@ -145,6 +145,13 @@ async def notify(client: discord.Client, text: str) -> None:
 _SET_RE = re.compile(r"^/setlogchannel(?:\s+<#(\d+)>)?\s*$", re.IGNORECASE)
 _CLEAR_RE = re.compile(r"^/clearlogchannel\s*$", re.IGNORECASE)
 
+# Help text for !help, kept next to the regexes above so the two can't drift apart.
+# NOTE the '/' prefix: these predate the voice commands' '!' prefix - unifying them is a TODO.
+COMMAND_HELP: list[tuple[str, str]] = [
+    ("/setlogchannel [#channel]", "Send my warnings and errors to a channel"),
+    ("/clearlogchannel", "Stop posting logs to a channel"),
+]
+
 
 async def handle_command(message: discord.Message) -> bool:
     """If the message is a log-channel command, handle it and return True; otherwise False.

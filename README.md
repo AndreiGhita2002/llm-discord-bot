@@ -133,6 +133,8 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 | `!np` | Show the current track |
 | `!pause`, `!resume` | Pause / resume playback |
 
+`!help` lists these plus every other command the bot knows.
+
 **Config** (`voice:` block — see `kronk_config.yaml` for all options and Kronk-voiced message
 templates):
 
@@ -180,11 +182,16 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 - **@mention** the bot to get a response
 - **Reply** to any of the bot's messages to continue the conversation
 - **`!play <song>`** to have the bot play YouTube audio in your voice channel (see above)
+- **`!help`** to list every command
 
 ## Changelog
 
 ### v0.2.3
 
+- **`!help`**: lists every command the bot knows, grouped into music / server admin / chat.
+  Each feature module owns its own help entries next to the code that implements them, so the
+  listing can't drift out of sync. Voice commands still appear when playback is unavailable,
+  annotated with the reason, rather than silently vanishing.
 - **Fixed voice close code 4017**: Discord's end-to-end voice encryption (DAVE) became
   mandatory on 2026-03-02. discord.py implements it but leaves the `davey` package optional, so
   without it the bot advertised no DAVE support and Discord refused every voice connection —
