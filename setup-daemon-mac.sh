@@ -12,15 +12,16 @@
 
 set -e
 
-# Configuration - detect bot directory dynamically
+# Configuration - detect bot directory dynamically. BOT_DIR is the PROJECT ROOT (the git repo,
+# holding kronk_config.yaml and all runtime state); the Python code lives in its src/ subdir.
 if [ -n "$1" ]; then
     BOT_DIR="$(cd "$1" && pwd)"
-elif [ -f "$(dirname "$0")/main.py" ]; then
+elif [ -f "$(dirname "$0")/src/main.py" ]; then
     BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-elif [ -f "./main.py" ]; then
+elif [ -f "./src/main.py" ]; then
     BOT_DIR="$(pwd)"
 else
-    echo "Error: Could not find main.py. Run this script from the bot directory or pass the path as an argument."
+    echo "Error: Could not find src/main.py. Run this script from the bot directory or pass the path as an argument."
     exit 1
 fi
 
@@ -182,7 +183,7 @@ run_bot() {
     # Run the bot using uv. Redirect straight to the log file (NO 'tee' pipe) so $! is the
     # uv/python pid, not a pipeline wrapper - otherwise stop_bot kills the wrong process and
     # orphaned bots pile up across restarts.
-    uv run python main.py >> "$LOG_FILE" 2>&1 &
+    uv run python src/main.py >> "$LOG_FILE" 2>&1 &
     BOT_PID=$!
     echo $BOT_PID > "$BOT_DIR/bot.pid"
     log "Bot started with PID: $BOT_PID"
@@ -204,8 +205,8 @@ stop_bot() {
 
     # Belt-and-braces: kill any bot python still running from THIS directory (catches orphans
     # left by earlier restarts). Dir-specific via the venv path, so other bots are untouched.
-    pkill -f "${BOT_DIR}/.venv/bin/python3 main.py" 2>/dev/null
-    pkill -f "${BOT_DIR}/.venv/bin/python main.py" 2>/dev/null
+    pkill -f "${BOT_DIR}/.venv/bin/python3 src/main.py" 2>/dev/null
+    pkill -f "${BOT_DIR}/.venv/bin/python src/main.py" 2>/dev/null
     sleep 1
 }
 

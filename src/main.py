@@ -61,6 +61,20 @@ async def _safe_delete(msg) -> None:
         pass
 
 
+# The bot's code lives in src/; the configs and all runtime state (memory db, reminders,
+# heartbeat, logs) live in the project root next to it. Relative paths from config are resolved
+# against that root rather than the current working directory, so the bot behaves identically
+# whether it's launched from the repo root, from src/, or by the daemon - and, crucially, the
+# heartbeat file always lands where run-bot.sh looks for it.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def project_path(path) -> Path:
+    """Resolve a configured path: absolute paths as given, relative ones from PROJECT_ROOT."""
+    p = Path(path).expanduser()
+    return p if p.is_absolute() else PROJECT_ROOT / p
+
+
 def deep_merge(base: dict, override: dict) -> dict:
     """Deep merge override into base. Override values take precedence."""
     result = base.copy()
@@ -77,7 +91,12 @@ def load_config(config_path: str = "config.yaml", default_path: str = "kronk_con
 
     Loads kronk_config.yaml as the base, then deep-merges config.yaml on top.
     This allows config.yaml to only specify fields that differ from defaults.
+
+    Both files live in the project root (next to src/), not in the working directory.
     """
+    config_path = project_path(config_path)
+    default_path = project_path(default_path)
+
     # Load default config (required)
     if not os.path.exists(default_path):
         print(f"Error: {default_path} not found.")
@@ -133,11 +152,11 @@ REQUEST_TIMEOUT = CONFIG.get("request_timeout", 180)
 # signal (covers the rare case where even the watchdog thread is starved).
 WATCHDOG_TIMEOUT = CONFIG.get("watchdog_timeout", 120)  # secs of stall before self-exit
 WATCHDOG_INTERVAL = CONFIG.get("watchdog_interval", 15)  # how often the thread checks
-HEARTBEAT_FILE = Path(CONFIG.get("heartbeat_file", "./bot.heartbeat"))
+HEARTBEAT_FILE = project_path(CONFIG.get("heartbeat_file", "./bot.heartbeat"))
 _heartbeat_ts = time.time()  # last time the event loop proved it was alive
 # Records the git commit the bot last started on, so on the next start we can tell whether the
 # code actually changed (a deploy) versus a plain crash-recovery restart - and announce it.
-VERSION_FILE = Path(CONFIG.get("version_file", "./.bot_version"))
+VERSION_FILE = project_path(CONFIG.get("version_file", "./.bot_version"))
 MESSAGE_HISTORY_LIMIT = CONFIG.get("message_history", {}).get("limit", 10)
 MESSAGE_MAX_AGE_MINUTES = CONFIG.get("message_history", {}).get("max_age_minutes", 0)
 USER_SUMMARY_CHANCE = CONFIG.get("memory", {}).get("user_summary_update_chance", 0.2)
@@ -212,7 +231,7 @@ def _current_commit() -> str | None:
         out = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             capture_output=True, text=True, timeout=10,
-            cwd=os.path.dirname(os.path.abspath(__file__)),
+            cwd=PROJECT_ROOT,
         )
         return out.stdout.strip() or None
     except Exception:
@@ -635,13 +654,15 @@ def kill_other_instances() -> None:
     this only ever kills OTHERS, so the current process always proceeds. Worst case (scan
     fails) we just carry on and might briefly duplicate.
 
-    Matches other processes whose command line contains this bot directory AND main.py (the
-    venv python is invoked as `<bot_dir>/.venv/bin/python3 main.py`), which is exactly the
-    sibling bot processes - not the `uv run` wrapper or bots in other directories.
+    Matches other processes whose command line contains this bot's project directory AND
+    main.py (the venv python is invoked as `<project_root>/.venv/bin/python3 src/main.py`),
+    which is exactly the sibling bot processes - not the `uv run` wrapper or bots in other
+    directories. Anchoring on the project root rather than this file's directory matters:
+    the interpreter path and the script path are separated in the command line, so `src` never
+    appears immediately before `main.py`.
     """
     my_pid = os.getpid()
-    bot_dir = os.path.dirname(os.path.abspath(__file__))
-    pattern = f"{bot_dir}.*main.py"
+    pattern = f"{PROJECT_ROOT}.*main.py"
     try:
         out = subprocess.run(
             ["pgrep", "-f", pattern],
@@ -672,7 +693,7 @@ if __name__ == "__main__":
         raise ValueError("DISCORD_BOT_TOKEN (or KRONK_TOKEN) environment variable is not set")
 
     # Set up logging: prints to terminal AND (once a channel is set) forwards WARNING+ to Discord.
-    dlog.init(CONFIG.get("log_channels_file", "./log_channels.json"))
+    dlog.init(str(project_path(CONFIG.get("log_channels_file", "./log_channels.json"))))
 
     # Take over from any older/stale instance (never blocks us from starting).
     kill_other_instances()
@@ -686,7 +707,7 @@ if __name__ == "__main__":
     # Init
     #======
     if do_memory:
-        memory.init_memory(CONFIG.get("memory_dir", "./bot_memory"))
+        memory.init_memory(str(project_path(CONFIG.get("memory_dir", "./bot_memory"))))
 
     # Configure the tool registry based on config + available capabilities.
     enabled_tools = tools.configure(
@@ -698,11 +719,14 @@ if __name__ == "__main__":
     tools.configure_announcements(CONFIG.get("tool_announcements"))
 
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
-    tools.init_reminders(CONFIG.get("reminders_file", "./bot_reminders.json"))
+    tools.init_reminders(str(project_path(CONFIG.get("reminders_file", "./bot_reminders.json"))))
 
     # Voice playback (/play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl) rather than
     # failing at command time; the commands themselves re-check and explain in chat.
-    VOICE_READY, voice_status = voice.configure(CONFIG.get("voice", {}))
+    _voice_cfg = dict(CONFIG.get("voice", {}))
+    if _voice_cfg.get("cookies_file"):
+        _voice_cfg["cookies_file"] = str(project_path(_voice_cfg["cookies_file"]))
+    VOICE_READY, voice_status = voice.configure(_voice_cfg)
     print(voice_status)
     if enabled_tools:
         print(f"Tools enabled ({len(enabled_tools)}): {', '.join(enabled_tools)}")

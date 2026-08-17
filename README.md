@@ -53,8 +53,10 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 
 6. **Run the bot**
    ```bash
-   uv run python main.py
+   uv run python src/main.py
    ```
+   Run it from the project root. The bot resolves its config and data files relative to the
+   repo (not your working directory), so it also works if you launch it from elsewhere.
 
 ## Web Search (Optional)
 
@@ -162,6 +164,11 @@ Use the included script to set up the bot as a launchd daemon:
 
 ### v0.2.3
 
+- **Source moved to `src/`**: all Python modules now live in `src/`, with configs, scripts and
+  runtime state (memory db, reminders, heartbeat, logs) staying in the project root. The entry
+  point is `uv run python src/main.py`. Config paths are now resolved relative to the project
+  root instead of the working directory, so the bot runs identically from anywhere; the daemon
+  scripts were updated to match.
 - **YouTube voice playback** (`voice.py`): `/play <search terms or url>` makes the bot join your
   voice channel and stream the top YouTube result, plus `/skip`, `/stop`, `/leave`, `/queue`,
   `/np`, `/pause` and `/resume`. Tracks queue up per server and play in order; the bot leaves
