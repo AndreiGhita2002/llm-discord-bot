@@ -50,6 +50,12 @@ try:  # discord.py needs PyNaCl to encrypt the voice stream
 except ImportError:  # pragma: no cover
     _HAS_NACL = False
 
+try:  # DAVE = Discord's end-to-end voice encryption, mandatory since 2026-03-02
+    import davey  # noqa: F401
+    _HAS_DAVEY = True
+except ImportError:  # pragma: no cover
+    _HAS_DAVEY = False
+
 
 # === Config (set by configure()) ===
 
@@ -202,6 +208,10 @@ def _unavailable_reason() -> Optional[str]:
         return "the yt-dlp package isn't installed (`uv sync`)"
     if not _HAS_NACL:
         return "PyNaCl isn't installed, so I can't send voice audio (`uv sync`)"
+    if not _HAS_DAVEY:
+        # Without davey, discord.py advertises max_dave_protocol_version 0 and Discord closes
+        # the voice websocket with 4017 - which otherwise shows up only as a silent retry loop.
+        return "the davey package isn't installed, so Discord refuses my voice connection (`uv sync`)"
     if shutil.which(FFMPEG_PATH) is None:
         return f"ffmpeg isn't installed (looked for '{FFMPEG_PATH}')"
     return None

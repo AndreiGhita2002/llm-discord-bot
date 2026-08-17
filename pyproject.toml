@@ -5,7 +5,9 @@ description = "LLM based discord bot. Optimised for entartained and mimicking hu
 requires-python = ">=3.12"
 
 dependencies = [
-    "discord.py>=2.3.0",
+    # 2.7.0 is the first release carrying DAVE support; anything older can't connect to voice
+    # at all now (close code 4017), regardless of whether davey is installed.
+    "discord.py>=2.7.1",
     "httpx>=0.27.0",
     "ollama>=0.4.0",
     "pyyaml>=6.0",
@@ -14,4 +16,9 @@ dependencies = [
     # The ffmpeg binary and libopus are system deps (macOS: `brew install ffmpeg`).
     "PyNaCl>=1.5.0",
     "yt-dlp>=2024.8.6",
+    # DAVE (Discord's end-to-end voice encryption). MANDATORY for voice since Discord enforced
+    # it on 2026-03-02: without it discord.py advertises max_dave_protocol_version 0 and the
+    # voice gateway rejects the connection with close code 4017. discord.py implements DAVE but
+    # leaves this dependency optional, so it must be requested explicitly.
+    "davey>=0.1.6",
 ]

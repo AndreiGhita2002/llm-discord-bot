@@ -113,7 +113,10 @@ downloaded: `yt-dlp` resolves a direct media URL and `ffmpeg` pipes it into Disc
    ```bash
    brew install ffmpeg          # macOS; on Debian/Ubuntu: apt install ffmpeg
    ```
-2. `uv sync` installs the Python side (`yt-dlp`, `PyNaCl`).
+2. `uv sync` installs the Python side (`yt-dlp`, `PyNaCl`, `davey`).
+
+   `davey` is not optional: Discord enforced end-to-end voice encryption (DAVE) on
+   2026-03-02, and without it the voice gateway rejects the bot with close code 4017.
 3. Make sure the bot has the **Connect** and **Speak** permissions in your voice channels.
 
 **Commands** (typed as normal messages, like `/setlogchannel`):
@@ -181,6 +184,12 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **Fixed voice close code 4017**: Discord's end-to-end voice encryption (DAVE) became
+  mandatory on 2026-03-02. discord.py implements it but leaves the `davey` package optional, so
+  without it the bot advertised no DAVE support and Discord refused every voice connection —
+  visible only as `Failed to connect to voice... Retrying in 1.0s` on repeat. `davey` is now a
+  required dependency, and the voice commands check for it so a missing install explains itself
+  in chat rather than retry-looping.
 - **`kill-bot.py`**: stops the bot at every layer (launchd agent → `run-bot.sh` guard → bot
   process), so it stays stopped instead of being restarted by the layer above. `--keep-daemon`
   turns it into a restart, `--dry-run` shows what it would kill. Stdlib-only, so it works even
