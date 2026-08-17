@@ -57,3 +57,5 @@ run-bot.sh
 .bot-runner-active.sh
 logs/
 .bot_version
+
+.claude
