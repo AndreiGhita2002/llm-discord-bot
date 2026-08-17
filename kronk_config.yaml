@@ -151,7 +151,7 @@ status:
   websearch_enabled: "Web search on"
   voice_enabled: "DJ Kronk"
 
-# Voice / YouTube playback (voice.py). Users type '/play <song name or youtube link>' and the
+# Voice / YouTube playback (voice.py). Users type '!play <song name or youtube link>' and the
 # bot joins their voice channel and streams the top YouTube hit.
 # Needs `yt-dlp` + `PyNaCl` (both in pyproject: run `uv sync`) and the `ffmpeg` binary +
 # libopus on the host (`brew install ffmpeg` covers both on macOS).
@@ -183,9 +183,11 @@ voice:
     searching:
       - "🔎 Ooh, music! Diggin' up “{query}” on the ol' YouTube…"
       - "🔎 Say no more! Huntin' down “{query}”…"
+    # Keep the bare {url} on its own line - Discord turns it into a video embed. (These
+    # overrides REPLACE the defaults in voice.py, so the link has to be repeated here.)
     now_playing:
-      - "🎶 Now spinnin': **{title}** [{duration}] — for {user}. Kronk-tacular choice!"
-      - "🎶 Here we go! **{title}** [{duration}], picked by {user}."
+      - "🎶 Now spinnin': **{title}** [{duration}] — for {user}. Kronk-tacular choice!\n{url}"
+      - "🎶 Here we go! **{title}** [{duration}], picked by {user}.\n{url}"
     queued:
       - "➕ Lined up **{title}** [{duration}] — you're #{position}. Patience, my friend."
     skipped:

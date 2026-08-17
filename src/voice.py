@@ -1,17 +1,17 @@
 """
 YouTube audio playback in Discord voice channels.
 
-Commands are plain text messages matched by regex - the same style as discord_logging.py,
-NOT Discord's slash-command API (the bot runs on a bare `discord.Client`, and this keeps all
-commands consistent):
+Commands are plain text messages matched by regex, NOT Discord's slash-command API (the bot
+runs on a bare `discord.Client`). They're prefixed with `!` rather than `/` so typing one
+doesn't trigger Discord's native slash-command autocomplete popup:
 
-    /play <search terms | url>   join the caller's voice channel and play (or queue) it
-    /skip                        skip the current track
-    /stop                        clear the queue and stop playing (stay connected)
-    /leave                       stop and disconnect
-    /queue                       show what's lined up
-    /np                          show the current track
-    /pause  /resume
+    !play <search terms | url>   join the caller's voice channel and play (or queue) it
+    !skip                        skip the current track
+    !stop                        clear the queue and stop playing (stay connected)
+    !leave                       stop and disconnect
+    !queue                       show what's lined up
+    !np                          show the current track
+    !pause  !resume
 
 Audio is streamed, never downloaded: yt-dlp resolves a direct media URL and ffmpeg pipes it
 into Discord. yt-dlp does blocking network I/O, so every resolve runs through
@@ -21,7 +21,7 @@ loop (the bot has been bitten by exactly that before, see the web tools in tools
 State is per-guild (`GuildPlayer`): a queue plus one background task that plays tracks in
 order and disconnects after `idle_timeout` seconds with nothing to play.
 
-Requirements: `yt-dlp` + `PyNaCl` (pip, see pyproject) and `ffmpeg` + `libopus` (system).
+Requirements: `yt-dlp` + `PyNaCl` + `davey` (pip, see pyproject) and `ffmpeg` + `libopus` (system).
 Each is checked at startup and again per command, so a missing piece degrades to a clear
 message in chat instead of a traceback.
 """
@@ -99,9 +99,11 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
         "🔎 Looking up “{query}” on YouTube…",
         "🔎 One sec, digging up “{query}”…",
     ],
-    "now_playing": [ #TODO: add the video link to the titles
-        "🎶 Now playing: **{title}** [{duration}] — for {user}",
-        "🎶 Here we go — **{title}** [{duration}], requested by {user}",
+    # The bare {url} on its own line is deliberate: Discord auto-embeds a YouTube link into a
+    # player card, which a markdown masked link ([text](url)) would NOT do in a normal message.
+    "now_playing": [
+        "🎶 Now playing: **{title}** [{duration}] — for {user}\n{url}",
+        "🎶 Here we go — **{title}** [{duration}], requested by {user}\n{url}",
     ],
     "queued": [
         "➕ Queued **{title}** [{duration}] — #{position} in line.",
@@ -197,7 +199,7 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     reason = _unavailable_reason()
     if reason:
         return False, f"Voice playback unavailable: {reason}"
-    return True, "Voice playback ready (/play)"
+    return True, "Voice playback ready (!play)"
 
 
 def _unavailable_reason() -> Optional[str]:
@@ -456,7 +458,7 @@ class GuildPlayer:
             await self._wind_down(idle_exit)
 
     async def _wind_down(self, idle_exit: bool) -> None:
-        """Leave the channel - unless a /play landed while we were shutting down.
+        """Leave the channel - unless a !play landed while we were shutting down.
 
         The handle is cleared first so disconnect() doesn't cancel the task we're running in.
         The queue re-check closes the narrow race where someone queues a track in the same
@@ -524,7 +526,7 @@ def _player_for(guild: discord.Guild) -> GuildPlayer:
 # === Commands ===
 
 _CMD_RE = re.compile(
-    r"^/(play|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
+    r"^!(play|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -580,7 +582,7 @@ def _author_voice_channel(message: discord.Message) -> Optional[discord.VoiceCha
 
 async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -> None:
     if not query:
-        await message.reply("Give me something to play: `/play <song name or youtube link>`")
+        await message.reply("Give me something to play: `!play <song name or youtube link>`")
         return
 
     channel = _author_voice_channel(message)

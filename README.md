@@ -11,7 +11,7 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 - Configurable message history for conversation context
 - **Memory system** with user summaries and conversation recall (can be toggled on/off)
 - Optional web search capability for up-to-date information
-- **YouTube audio in voice channels** — `/play <song name or link>` and the bot joins your voice channel
+- **YouTube audio in voice channels** — `!play <song name or link>` and the bot joins your voice channel
 
 ## Requirements
 
@@ -119,18 +119,19 @@ downloaded: `yt-dlp` resolves a direct media URL and `ffmpeg` pipes it into Disc
    2026-03-02, and without it the voice gateway rejects the bot with close code 4017.
 3. Make sure the bot has the **Connect** and **Speak** permissions in your voice channels.
 
-**Commands** (typed as normal messages, like `/setlogchannel`):
+**Commands** — typed as normal chat messages, not Discord slash commands. They use a `!`
+prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 
 | Command | What it does |
 | --- | --- |
-| `/play <search terms>` | Joins your voice channel and plays the top YouTube result |
-| `/play <url>` | Same, but for a direct link |
-| `/skip` | Skip the current track |
-| `/stop` | Stop and clear the queue (stays connected) |
-| `/leave` | Stop and disconnect |
-| `/queue` | Show what's lined up |
-| `/np` | Show the current track |
-| `/pause`, `/resume` | Pause / resume playback |
+| `!play <search terms>` | Joins your voice channel and plays the top YouTube result |
+| `!play <url>` | Same, but for a direct link |
+| `!skip` | Skip the current track |
+| `!stop` | Stop and clear the queue (stays connected) |
+| `!leave` | Stop and disconnect |
+| `!queue` | Show what's lined up |
+| `!np` | Show the current track |
+| `!pause`, `!resume` | Pause / resume playback |
 
 **Config** (`voice:` block — see `kronk_config.yaml` for all options and Kronk-voiced message
 templates):
@@ -146,8 +147,8 @@ voice:
   cookies_file: null            # yt-dlp cookies, if YouTube starts asking
 ```
 
-If `ffmpeg`, `yt-dlp` or `PyNaCl` is missing, the feature reports itself unavailable at startup
-and the commands explain what's missing in chat instead of erroring out.
+If `ffmpeg`, `yt-dlp`, `PyNaCl` or `davey` is missing, the feature reports itself unavailable at
+startup and the commands explain what's missing in chat instead of erroring out.
 
 ## Running as a Service (macOS)
 
@@ -178,7 +179,7 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 - **@mention** the bot to get a response
 - **Reply** to any of the bot's messages to continue the conversation
-- **`/play <song>`** to have the bot play YouTube audio in your voice channel (see above)
+- **`!play <song>`** to have the bot play YouTube audio in your voice channel (see above)
 
 ## Changelog
 
@@ -199,15 +200,16 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
   point is `uv run python src/main.py`. Config paths are now resolved relative to the project
   root instead of the working directory, so the bot runs identically from anywhere; the daemon
   scripts were updated to match.
-- **YouTube voice playback** (`voice.py`): `/play <search terms or url>` makes the bot join your
-  voice channel and stream the top YouTube result, plus `/skip`, `/stop`, `/leave`, `/queue`,
-  `/np`, `/pause` and `/resume`. Tracks queue up per server and play in order; the bot leaves
+- **YouTube voice playback** (`voice.py`): `!play <search terms or url>` makes the bot join your
+  voice channel and stream the top YouTube result, plus `!skip`, `!stop`, `!leave`, `!queue`,
+  `!np`, `!pause` and `!resume`. Tracks queue up per server and play in order; the bot leaves
   after `idle_timeout_seconds` with nothing to play, or as soon as the last human leaves the
   channel. Audio is streamed rather than downloaded (yt-dlp resolves a media URL, ffmpeg pipes
   it into Discord), and every yt-dlp call runs off the event loop with a timeout so a slow
   YouTube lookup can't freeze the bot. New `voice:` config block with per-persona message
-  templates. Adds the `yt-dlp` and `PyNaCl` dependencies; `ffmpeg` + libopus are system
-  requirements (`brew install ffmpeg`).
+  templates. Adds the `yt-dlp`, `PyNaCl` and `davey` dependencies; `ffmpeg` + libopus are system
+  requirements (`brew install ffmpeg`). Commands use a `!` prefix rather than `/` so typing one
+  doesn't trigger Discord's native slash-command autocomplete.
 
 ### v0.2.2
 

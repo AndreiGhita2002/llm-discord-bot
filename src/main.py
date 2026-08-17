@@ -271,7 +271,7 @@ def _get_channel_lock(channel_id: int) -> asyncio.Lock:
 # Post a short "looking this up…" line to the channel before running a lookup tool.
 ANNOUNCE_TOOLS = CONFIG.get("announce_tools", True)
 
-# Whether YouTube->voice playback (/play) is usable: set at startup by voice.configure(),
+# Whether YouTube->voice playback (!play) is usable: set at startup by voice.configure(),
 # which checks the config toggle plus yt-dlp / PyNaCl / ffmpeg being present.
 VOICE_READY = False
 
@@ -620,7 +620,7 @@ async def on_message(message: discord.Message):
         oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
         _processed_messages -= set(oldest)
 
-    # Handle our own '/' text commands (e.g. /setlogchannel, /play) before any chat/LLM handling.
+    # Handle our own text commands (/setlogchannel, !play) before any chat/LLM handling.
     if await dlog.handle_command(message):
         return
     if await voice.handle_command(message):
@@ -721,7 +721,7 @@ if __name__ == "__main__":
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
     tools.init_reminders(str(project_path(CONFIG.get("reminders_file", "./bot_reminders.json"))))
 
-    # Voice playback (/play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl) rather than
+    # Voice playback (!play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl) rather than
     # failing at command time; the commands themselves re-check and explain in chat.
     _voice_cfg = dict(CONFIG.get("voice", {}))
     if _voice_cfg.get("cookies_file"):
