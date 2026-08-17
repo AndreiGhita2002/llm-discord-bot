@@ -149,6 +149,61 @@ log_channels_file: "./log_channels.json"
 status:
   memory_enabled: "Kronk remembers"
   websearch_enabled: "Web search on"
+  voice_enabled: "DJ Kronk"
+
+# Voice / YouTube playback (voice.py). Users type '/play <song name or youtube link>' and the
+# bot joins their voice channel and streams the top YouTube hit.
+# Needs `yt-dlp` + `PyNaCl` (both in pyproject: run `uv sync`) and the `ffmpeg` binary +
+# libopus on the host (`brew install ffmpeg` covers both on macOS).
+voice:
+  enabled: true
+  # Path to the ffmpeg binary (must be on PATH, or give an absolute path).
+  ffmpeg_path: "ffmpeg"
+  # Only needed if discord.py can't autodetect libopus (e.g. "/opt/homebrew/lib/libopus.dylib").
+  opus_path: null
+  # Optional yt-dlp cookies file; YouTube sometimes demands one for age/bot-check gated videos.
+  cookies_file: null
+  # Playback volume multiplier (1.0 = as-is).
+  volume: 1.0
+  # Refuse anything longer than this, so nobody queues a 10-hour loop. 0 = no limit.
+  max_duration_minutes: 180
+  # Max tracks waiting in line per server (the playing one doesn't count).
+  max_queue: 20
+  # Leave the voice channel after this long with an empty queue.
+  idle_timeout_seconds: 300
+  # Hard ceiling on a single yt-dlp lookup (it's a blocking network call, run off-loop).
+  resolve_timeout: 60
+  # Leave as soon as the last human leaves the voice channel.
+  leave_when_alone: true
+
+  # Chat lines for playback events, in Kronk's voice. One variant is picked at random.
+  # Placeholders: {title} {duration} {user} {url} {uploader} {position} {query} {limit}
+  # {error} {reason}. Set a key to [] to stay silent; omit it to use the built-in default.
+  messages:
+    searching:
+      - "🔎 Ooh, music! Diggin' up “{query}” on the ol' YouTube…"
+      - "🔎 Say no more! Huntin' down “{query}”…"
+    now_playing:
+      - "🎶 Now spinnin': **{title}** [{duration}] — for {user}. Kronk-tacular choice!"
+      - "🎶 Here we go! **{title}** [{duration}], picked by {user}."
+    queued:
+      - "➕ Lined up **{title}** [{duration}] — you're #{position}. Patience, my friend."
+    skipped:
+      - "⏭️ Yeah okay, **{title}** wasn't it. Movin' on!"
+    stopped:
+      - "⏹️ Music's off and the list is wiped. Silence! Kronk-style."
+    left:
+      - "👋 Kronk out! Poppin' outta the voice channel."
+    idle_left:
+      - "👋 Nothin' left to play, so I'm headin' out. Later!"
+    not_in_voice:
+      - "Ya gotta be IN a voice channel first, buddy. I can't play to an empty room."
+    nothing_playing:
+      - "I ain't playin' anything right now. Kinda quiet, huh?"
+    no_results:
+      - "Hmm. Searched high and low, found zilch for “{query}”. Weird."
+    too_long:
+      - "Whoa, {duration}?! That's a whole afternoon. My limit's {limit}."
 
 # Tool calling
 # The main model natively decides when to call tools, runs them, and can chain calls.

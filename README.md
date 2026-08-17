@@ -11,12 +11,14 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 - Configurable message history for conversation context
 - **Memory system** with user summaries and conversation recall (can be toggled on/off)
 - Optional web search capability for up-to-date information
+- **YouTube audio in voice channels** — `/play <song name or link>` and the bot joins your voice channel
 
 ## Requirements
 
 - Python 3.12+
 - [Ollama](https://ollama.com/) running locally
 - A Discord bot token
+- `ffmpeg` (+ libopus) on the host, only if you want voice playback — `brew install ffmpeg`
 
 ## Setup
 
@@ -98,6 +100,50 @@ When enabled, the bot will:
 - Store conversation snippets with semantic embeddings
 - Recall relevant past conversations when responding
 
+## Voice Playback (YouTube)
+
+The bot can join a voice channel and stream audio from YouTube. Audio is streamed, never
+downloaded: `yt-dlp` resolves a direct media URL and `ffmpeg` pipes it into Discord.
+
+**Setup**:
+1. Install the system dependencies (this also provides libopus, which Discord needs to encode
+   the audio):
+   ```bash
+   brew install ffmpeg          # macOS; on Debian/Ubuntu: apt install ffmpeg
+   ```
+2. `uv sync` installs the Python side (`yt-dlp`, `PyNaCl`).
+3. Make sure the bot has the **Connect** and **Speak** permissions in your voice channels.
+
+**Commands** (typed as normal messages, like `/setlogchannel`):
+
+| Command | What it does |
+| --- | --- |
+| `/play <search terms>` | Joins your voice channel and plays the top YouTube result |
+| `/play <url>` | Same, but for a direct link |
+| `/skip` | Skip the current track |
+| `/stop` | Stop and clear the queue (stays connected) |
+| `/leave` | Stop and disconnect |
+| `/queue` | Show what's lined up |
+| `/np` | Show the current track |
+| `/pause`, `/resume` | Pause / resume playback |
+
+**Config** (`voice:` block — see `kronk_config.yaml` for all options and Kronk-voiced message
+templates):
+
+```yaml
+voice:
+  enabled: true
+  volume: 1.0
+  max_duration_minutes: 180     # refuse anything longer (0 = no limit)
+  max_queue: 20                 # tracks waiting per server
+  idle_timeout_seconds: 300     # leave after this long with an empty queue
+  leave_when_alone: true        # leave when the last human leaves the channel
+  cookies_file: null            # yt-dlp cookies, if YouTube starts asking
+```
+
+If `ffmpeg`, `yt-dlp` or `PyNaCl` is missing, the feature reports itself unavailable at startup
+and the commands explain what's missing in chat instead of erroring out.
+
 ## Running as a Service (macOS)
 
 Use the included script to set up the bot as a launchd daemon:
@@ -110,8 +156,21 @@ Use the included script to set up the bot as a launchd daemon:
 
 - **@mention** the bot to get a response
 - **Reply** to any of the bot's messages to continue the conversation
+- **`/play <song>`** to have the bot play YouTube audio in your voice channel (see above)
 
 ## Changelog
+
+### v0.2.3
+
+- **YouTube voice playback** (`voice.py`): `/play <search terms or url>` makes the bot join your
+  voice channel and stream the top YouTube result, plus `/skip`, `/stop`, `/leave`, `/queue`,
+  `/np`, `/pause` and `/resume`. Tracks queue up per server and play in order; the bot leaves
+  after `idle_timeout_seconds` with nothing to play, or as soon as the last human leaves the
+  channel. Audio is streamed rather than downloaded (yt-dlp resolves a media URL, ffmpeg pipes
+  it into Discord), and every yt-dlp call runs off the event loop with a timeout so a slow
+  YouTube lookup can't freeze the bot. New `voice:` config block with per-persona message
+  templates. Adds the `yt-dlp` and `PyNaCl` dependencies; `ffmpeg` + libopus are system
+  requirements (`brew install ffmpeg`).
 
 ### v0.2.2
 

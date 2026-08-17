@@ -17,6 +17,7 @@ import yaml
 
 import memory
 import tools
+import voice
 import discord_logging as dlog
 from discord_logging import log
 from tools import ToolContext
@@ -251,6 +252,10 @@ def _get_channel_lock(channel_id: int) -> asyncio.Lock:
 # Post a short "looking this up…" line to the channel before running a lookup tool.
 ANNOUNCE_TOOLS = CONFIG.get("announce_tools", True)
 
+# Whether YouTube->voice playback (/play) is usable: set at startup by voice.configure(),
+# which checks the config toggle plus yt-dlp / PyNaCl / ffmpeg being present.
+VOICE_READY = False
+
 do_memory = CONFIG.get("memory", {}).get("do_memory", False)
 do_user_memory = CONFIG.get("memory", {}).get("user_memory", False)
 do_conversation_memory = CONFIG.get("memory", {}).get("conversation_memory", False)
@@ -403,6 +408,8 @@ async def on_ready():
         status_parts.append(status_config.get("memory_enabled", "Memory on"))
     if tools.is_enabled("web_search"):
         status_parts.append(status_config.get("websearch_enabled", "Web search on"))
+    if VOICE_READY:
+        status_parts.append(status_config.get("voice_enabled", "DJ Kronk"))
 
     if status_parts:
         status_text = " | ".join(status_parts)
@@ -436,6 +443,16 @@ async def on_ready():
         suffix = f" `{current_sha}`" if current_sha else ""
         announce = f"✅ Kronk online as {client.user} — {base}{suffix}"
     await dlog.notify(client, announce)
+
+
+@client.event
+async def on_voice_state_update(member: discord.Member, before: discord.VoiceState,
+                                after: discord.VoiceState):
+    """Let the voice player leave when its channel empties out (or when we get kicked)."""
+    try:
+        await voice.handle_voice_state_update(client, member, before, after)
+    except Exception as e:
+        log.warning(f"Voice state update handling failed: {e}")
 
 
 @client.event
@@ -584,8 +601,10 @@ async def on_message(message: discord.Message):
         oldest = sorted(_processed_messages)[:_processed_messages_max // 2]
         _processed_messages -= set(oldest)
 
-    # Handle our own '/' text commands (e.g. /setlogchannel) before any chat/LLM handling.
+    # Handle our own '/' text commands (e.g. /setlogchannel, /play) before any chat/LLM handling.
     if await dlog.handle_command(message):
+        return
+    if await voice.handle_command(message):
         return
 
     # fetch the referenced message if it exists:
@@ -680,6 +699,11 @@ if __name__ == "__main__":
 
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
     tools.init_reminders(CONFIG.get("reminders_file", "./bot_reminders.json"))
+
+    # Voice playback (/play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl) rather than
+    # failing at command time; the commands themselves re-check and explain in chat.
+    VOICE_READY, voice_status = voice.configure(CONFIG.get("voice", {}))
+    print(voice_status)
     if enabled_tools:
         print(f"Tools enabled ({len(enabled_tools)}): {', '.join(enabled_tools)}")
     else:
