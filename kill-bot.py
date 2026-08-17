@@ -5,9 +5,12 @@ There are up to four layers to take down, and killing only the inner one is why 
 and it came back" happens:
 
     launchd agent (com.$USER.<dir>)   restarts run-bot.sh if it exits non-zero
-      run-bot.sh (the guard loop)     restarts the bot within ~15s if it looks dead or hung
+      run-bot.sh -> the guard loop    restarts the bot within ~15s if it looks dead or hung
         uv run python src/main.py     wrapper process
           .venv/bin/python3 …main.py  the actual bot
+
+`run-bot.sh` is a thin launcher that execs `scripts/bot-runner.sh` (via a private copy,
+`.bot-runner-active.sh`); all three names are matched as the guard layer.
 
 By default this stops all of them for THIS bot directory. It matches the current layout
 (`src/main.py`) and the older one (`main.py` in the repo root), and both `python` and
@@ -89,9 +92,13 @@ def find_bot_processes(bot_dir: Path) -> list[tuple[int, str]]:
 
 
 def find_guard_processes(bot_dir: Path) -> list[tuple[int, str]]:
-    runner = str(bot_dir / "run-bot.sh")
+    # Three shapes, depending on vintage: the old self-contained run-bot.sh, the current thin
+    # shim of the same name, and the copy it execs into (.bot-runner-active.sh in the root, or
+    # scripts/bot-runner.sh directly if the copy could not be made).
+    runners = [str(bot_dir / name) for name in
+               ("run-bot.sh", ".bot-runner-active.sh", "scripts/bot-runner.sh")]
     return [(pid, cmd) for pid, cmd in list_processes()
-            if runner in cmd and pid not in (os.getpid(), os.getppid())]
+            if any(r in cmd for r in runners) and pid not in (os.getpid(), os.getppid())]
 
 
 def find_foreign_bots(bot_dir: Path) -> list[tuple[int, str]]:

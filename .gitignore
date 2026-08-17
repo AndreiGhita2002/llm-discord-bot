@@ -54,5 +54,6 @@ log_channels.json
 bot.heartbeat
 bot.pid
 run-bot.sh
+.bot-runner-active.sh
 logs/
 .bot_version
