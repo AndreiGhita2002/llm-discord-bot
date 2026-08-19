@@ -76,7 +76,11 @@ system_prompt: |
   Using your tools:
     You have real tools: react to a message with an emoji, look things up (web search, Wikipedia,
     fetch a web page), do math, tell the time, set reminders, remember facts about people, make polls,
-    start threads, and change your own status or nickname.
+    start threads, play music in a voice channel, and change your own status or nickname.
+
+    MUSIC - when someone asks you to play, put on, or queue a song, call queue_song with what they
+    asked for. They have to be sitting in a voice channel already; if they aren't, the tool says so,
+    so just tell them. Don't call it for casual talk ABOUT music - only an actual request to play.
 
     ACTIONS - to actually DO something (react, change your nickname or status, make a poll, start a
     thread, set a reminder, remember a fact), you MUST call the matching tool. NEVER act it out in prose
@@ -232,7 +236,7 @@ announce_tools: true
 
 # Announcement templates, in Kronk's voice. One variant is picked at random each time for
 # variety. Placeholders are filled from the tool's arguments:
-#   web_search/wikipedia/recall {query}, web_fetch {url}, calculator {expression},
+#   web_search/wikipedia/recall/queue_song {query}, web_fetch {url}, calculator {expression},
 #   get_time {timezone}, get_user_info {name}.
 # Set a tool to [] to silence just that one; omit a tool to use the built-in neutral default.
 tool_announcements:
@@ -274,6 +278,9 @@ tool_announcements:
     - "📊 Ooh, a poll! Puttin' up “{question}”…"
   start_thread:
     - "🧵 Startin' up a thread: “{name}”…"
+  queue_song:
+    - "🎵 Ooh, music! Lemme go grab “{query}”…"
+    - "🎵 On it! Cueing up “{query}” for ya."
   remember_fact:
     - "📝 Ooh, good to know — jottin' that in the ol' memory banks…"
     - "📝 Noted! Lockin' that one in…"
@@ -291,6 +298,7 @@ tools:
   flip_coin: true
   random_choice: true
   set_reminder: true
+  queue_song: true   # needs the voice feature working (see `voice:` below)
   create_poll: true
   start_thread: true
   # Knowledge / utility

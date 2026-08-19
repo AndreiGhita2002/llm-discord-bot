@@ -188,6 +188,11 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **`queue_song` tool**: the LLM can now queue music itself — "kronk, put on some jazz" works as
+  plain conversation, no command needed. It routes through the same code path as `!play`, so the
+  duration limit, queue cap and channel permissions all still apply, and it can only join the
+  voice channel the person asking is already sitting in. Disabled automatically when voice
+  playback isn't available, and switchable via `tools: queue_song:` in config.
 - **`!help`**: lists every command the bot knows, grouped into music / server admin / chat.
   Each feature module owns its own help entries next to the code that implements them, so the
   listing can't drift out of sync. Voice commands still appear when playback is unavailable,

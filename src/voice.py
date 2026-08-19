@@ -576,7 +576,7 @@ async def handle_command(message: discord.Message) -> bool:
     player.text_channel = message.channel
 
     if command == "play":
-        await _cmd_play(message, player, argument)
+        await _cmd_play(message, argument)
     elif command == "skip":
         await _cmd_skip(message, player)
     elif command == "stop":
@@ -599,17 +599,110 @@ def _author_voice_channel(message: discord.Message) -> Optional[discord.VoiceCha
     return state.channel if state else None
 
 
-async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -> None:
+@dataclass
+class PlayResult:
+    """Outcome of a play/queue request."""
+    ok: bool
+    message: str           # human-readable line: safe to post in chat OR hand back to the model
+    started: bool = False  # went straight to playing (the player loop announces that itself)
+    title: str = ""
+    position: int = 0
+
+
+def play_precheck(message: discord.Message) -> Optional[str]:
+    """Cheap checks to run before spending a yt-dlp lookup. Returns an error line, or None."""
+    reason = _unavailable_reason()
+    if reason:
+        return _say("unavailable", reason=reason)
+    if message.guild is None:
+        return "That only works in a server."
+    if _author_voice_channel(message) is None:
+        return _say("not_in_voice")
+    if len(_player_for(message.guild).queue) >= MAX_QUEUE:
+        return _say("queue_full", limit=MAX_QUEUE)
+    return None
+
+
+async def enqueue_request(message: discord.Message, query: str) -> PlayResult:
+    """Resolve `query`, join the requester's voice channel and queue it.
+
+    This is the ONE path used by both `!play` and the LLM's queue_song tool, so the two can't
+    drift apart on the things that matter: duration limits, the queue cap, channel permissions
+    and stale-stream-URL handling. Callers differ only in how they report the result.
+    """
+    error = play_precheck(message)
+    if error:
+        return PlayResult(False, error)
+
+    channel = _author_voice_channel(message)
+    player = _player_for(message.guild)
+    player.text_channel = message.channel
+
+    try:
+        track = await resolve_track(query, requested_by=message.author.display_name)
+    except (asyncio.TimeoutError, TimeoutError):
+        return PlayResult(False, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
+    except LookupError:
+        return PlayResult(False, _say("no_results", query=query))
+    except Exception as e:
+        log.warning(f"yt-dlp failed for {query!r}: {e}")
+        return PlayResult(False, _say("no_results", query=query))
+
+    limit_seconds = MAX_DURATION_MINUTES * 60
+    if limit_seconds and track.duration and track.duration > limit_seconds:
+        return PlayResult(False, _say(
+            "too_long",
+            duration=_format_duration(track.duration),
+            limit=_format_duration(limit_seconds),
+            title=track.title,
+        ))
+
+    try:
+        await player.connect(channel)
+    except PermissionError as e:
+        return PlayResult(False, str(e))
+    except Exception as e:
+        log.warning(f"Could not join voice channel {channel.id}: {e}")
+        return PlayResult(False, f"I couldn't join {channel.name}: {e}")
+
+    position = player.enqueue(track)
+    player.start()
+
+    # Position 1 with nothing playing means the player loop is about to post its own
+    # "now playing" line, so the caller must not repeat it.
+    if position == 1 and player.current is None:
+        return PlayResult(True, f"Now playing: {track.title}", started=True,
+                          title=track.title, position=position)
+    return PlayResult(True, _say(
+        "queued",
+        title=track.title,
+        duration=_format_duration(track.duration),
+        position=position,
+        url=track.webpage_url,
+        uploader=track.uploader,
+    ), title=track.title, position=position)
+
+
+async def _delete_quietly(msg) -> None:
+    """Delete a message, ignoring any failure (already gone / no permission)."""
+    if msg is None:
+        return
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+
+async def _cmd_play(message: discord.Message, query: str) -> None:
     if not query:
         await message.reply("Give me something to play: `!play <song name or youtube link>`")
         return
 
-    channel = _author_voice_channel(message)
-    if channel is None:
-        await message.reply(_say("not_in_voice"))
-        return
-    if len(player.queue) >= MAX_QUEUE:
-        await message.reply(_say("queue_full", limit=MAX_QUEUE))
+    # Check the cheap things before posting "searching…", so an error doesn't flash a
+    # placeholder first.
+    error = play_precheck(message)
+    if error:
+        await message.reply(error)
         return
 
     status = None
@@ -618,58 +711,11 @@ async def _cmd_play(message: discord.Message, player: GuildPlayer, query: str) -
     except Exception:
         pass
 
-    try:
-        track = await resolve_track(query, requested_by=message.author.display_name)
-    except (asyncio.TimeoutError, TimeoutError):
-        await _edit_or_send(status, message, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
-        return
-    except LookupError:
-        await _edit_or_send(status, message, _say("no_results", query=query))
-        return
-    except Exception as e:
-        log.warning(f"yt-dlp failed for {query!r}: {e}")
-        await _edit_or_send(status, message, _say("no_results", query=query))
-        return
-
-    limit_seconds = MAX_DURATION_MINUTES * 60
-    if limit_seconds and track.duration and track.duration > limit_seconds:
-        await _edit_or_send(status, message, _say(
-            "too_long",
-            duration=_format_duration(track.duration),
-            limit=_format_duration(limit_seconds),
-            title=track.title,
-        ))
-        return
-
-    try:
-        await player.connect(channel)
-    except PermissionError as e:
-        await _edit_or_send(status, message, str(e))
-        return
-    except Exception as e:
-        log.warning(f"Could not join voice channel {channel.id}: {e}")
-        await _edit_or_send(status, message, f"I couldn't join {channel.name}: {e}")
-        return
-
-    position = player.enqueue(track)
-    player.start()
-
-    # Position 1 with nothing playing means the loop is about to announce "now playing"
-    # itself, so only say something here when it's genuinely waiting behind another track.
-    if position > 1 or player.current is not None:
-        await _edit_or_send(status, message, _say(
-            "queued",
-            title=track.title,
-            duration=_format_duration(track.duration),
-            position=position,
-            url=track.webpage_url,
-            uploader=track.uploader,
-        ))
-    elif status is not None:
-        try:
-            await status.delete()
-        except Exception:
-            pass
+    result = await enqueue_request(message, query)
+    if result.started:
+        await _delete_quietly(status)   # the player loop posts "now playing" instead
+    else:
+        await _edit_or_send(status, message, result.message)
 
 
 async def _edit_or_send(status, message: discord.Message, text: str) -> None:

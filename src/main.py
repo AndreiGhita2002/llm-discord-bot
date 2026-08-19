@@ -749,25 +749,27 @@ if __name__ == "__main__":
     if do_memory:
         memory.init_memory(str(project_path(CONFIG.get("memory_dir", "./bot_memory"))))
 
+    # Voice playback (!play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl/davey) rather
+    # than failing at command time; the commands themselves re-check and explain in chat.
+    # MUST run before tools.configure(): the queue_song tool is gated on VOICE_READY.
+    _voice_cfg = dict(CONFIG.get("voice", {}))
+    if _voice_cfg.get("cookies_file"):
+        _voice_cfg["cookies_file"] = str(project_path(_voice_cfg["cookies_file"]))
+    VOICE_READY, voice_status = voice.configure(_voice_cfg)
+    print(voice_status)
+
     # Configure the tool registry based on config + available capabilities.
     enabled_tools = tools.configure(
         CONFIG.get("tools", {}),
         has_api_key=bool(OLLAMA_API_KEY),
         memory_available=do_memory,
+        voice_available=VOICE_READY,
     )
     # Load any persona-specific announcement templates (fall back to built-in defaults).
     tools.configure_announcements(CONFIG.get("tool_announcements"))
 
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
     tools.init_reminders(str(project_path(CONFIG.get("reminders_file", "./bot_reminders.json"))))
-
-    # Voice playback (!play). Reports why it's off (missing ffmpeg/yt-dlp/PyNaCl) rather than
-    # failing at command time; the commands themselves re-check and explain in chat.
-    _voice_cfg = dict(CONFIG.get("voice", {}))
-    if _voice_cfg.get("cookies_file"):
-        _voice_cfg["cookies_file"] = str(project_path(_voice_cfg["cookies_file"]))
-    VOICE_READY, voice_status = voice.configure(_voice_cfg)
-    print(voice_status)
     if enabled_tools:
         print(f"Tools enabled ({len(enabled_tools)}): {', '.join(enabled_tools)}")
     else:

@@ -31,6 +31,7 @@ import discord
 import ollama
 
 import memory
+import voice
 
 log = logging.getLogger("kronk")
 
@@ -52,6 +53,7 @@ class Tool:
     needs_api_key: bool = False   # web tools: require OLLAMA_API_KEY
     needs_memory: bool = False    # memory tools: require do_memory
     needs_discord: bool = False   # need a live message/client context
+    needs_voice: bool = False     # voice tools: require working audio playback
 
 
 def _fn(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -252,6 +254,25 @@ async def _set_reminder(args: dict, ctx: ToolContext) -> str:
     await _persist_add(record)
     _schedule_reminder(ctx.client, record)
     return f"Reminder set for {minutes:g} minute(s) from now: '{text}'"
+
+
+async def _queue_song(args: dict, ctx: ToolContext) -> str:
+    """Queue a song in the voice channel the requester is sitting in.
+
+    Delegates to voice.enqueue_request, the same path `!play` uses, so the model can't bypass
+    the duration limit, queue cap or permission checks. The user must already be in a voice
+    channel - the bot never picks one on its own.
+    """
+    if ctx.message is None:
+        return "Queueing music needs an active channel context."
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "No song was given, so nothing was queued."
+    print(f"[TOOL] queue_song: {query}")
+    result = await voice.enqueue_request(ctx.message, query)
+    if not result.ok:
+        return f"Could not queue it: {result.message}"
+    return result.message
 
 
 # ======================================================================================
@@ -490,6 +511,14 @@ _REGISTRY: list[Tool] = [
          "text": {"type": "string", "description": "What to remind them about."}},
         ["minutes", "text"],
     ), _set_reminder, needs_discord=True),
+    Tool("queue_song", _fn(
+        "queue_song",
+        "Play or queue a song in the voice channel the user is currently sitting in. Use this "
+        "whenever someone asks you to play, put on, or queue music. The user must already be in "
+        "a voice channel. Accepts a song name, an artist, or a YouTube URL.",
+        {"query": {"type": "string",
+                   "description": "Song/artist to search for, or a YouTube URL."}}, ["query"],
+    ), _queue_song, needs_discord=True, needs_voice=True),
 
     # --- knowledge / utility ---
     Tool("wikipedia", _fn(
@@ -610,6 +639,10 @@ DEFAULT_ANNOUNCEMENTS: dict[str, list[str]] = {
     "start_thread": [
         "🧵 Starting a thread: “{name}”…",
     ],
+    "queue_song": [
+        "🎵 Queueing up “{query}”…",
+        "🎵 Righto, finding “{query}” for the voice channel…",
+    ],
     "remember_fact": [
         "📝 Noting that down…",
     ],
@@ -671,7 +704,8 @@ def announce(name: str, args: dict, ctx: ToolContext = None) -> Optional[str]:
         return None
 
 
-def configure(tools_config: dict, has_api_key: bool, memory_available: bool) -> list[str]:
+def configure(tools_config: dict, has_api_key: bool, memory_available: bool,
+              voice_available: bool = False) -> list[str]:
     """Decide which tools are active based on config + capabilities.
 
     A tool is enabled if config['tools'][name] is truthy (or its default when unset) AND its
@@ -688,6 +722,8 @@ def configure(tools_config: dict, has_api_key: bool, memory_available: bool) -> 
         if tool.needs_api_key and not has_api_key:
             continue
         if tool.needs_memory and not memory_available:
+            continue
+        if tool.needs_voice and not voice_available:
             continue
         _enabled[tool.name] = tool
     return list(_enabled)
