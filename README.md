@@ -188,6 +188,11 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **Fixed diagnostics crashing playback**: the new failure-reporting code read discord.py's
+  `_process` after the track ended, by which point discord.py has reset it to its `MISSING`
+  sentinel — which isn't `None`, so the guard didn't catch it. Every track ended with
+  `'_MissingSentinel' object has no attribute 'poll'`. The process handle is now captured up
+  front and all diagnostics are wrapped, so reporting can never break playback again.
 - **Track links in replies**: when the LLM queues music, its reply now always ends with
   `🎶 Now playing: <title> <url>`, appended in code rather than left to the model to remember.
 - **Diagnosable voice joins**: every play request is logged with its route (`[command]` vs

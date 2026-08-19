@@ -215,6 +215,15 @@ from the queue instantly with no audio - because ffmpeg dying on the input looks
 like an ordinary end-of-track. If playback breaks after a YouTube change, try other clients
 (`ios`, `tv`, `web_safari`, `mweb`, `web`) - it's config, no code change needed.
 
+**Never read `raw._process` after playback**: discord.py's `AudioPlayer.run()` calls the `after`
+callback and THEN `source.cleanup()`, which resets `_process` to `discord.utils.MISSING`. Our
+callback only *schedules* the event set, so by the time `_play()` resumes, `_process` is the
+sentinel - and `MISSING is not None` is True, so a None-guard does NOT save you (it has no
+`.poll()`; this shipped once as `'_MissingSentinel' object has no attribute 'poll'` and broke
+every track it was meant to report on). `_play()` therefore keeps its own reference to the Popen
+before starting, and all post-playback diagnostics run inside `_report_playback()` wrapped in
+try/except - instrumentation must never be able to break playback.
+
 **Silent-failure detection**: `_play()` times each track and captures ffmpeg's stderr (to a temp
 FILE, not a PIPE - nothing drains a pipe mid-song, so a chatty stream would fill the 64KB buffer
 and wedge ffmpeg). A track that ends in under `MIN_PLAYBACK_SECONDS` without a deliberate

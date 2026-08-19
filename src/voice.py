@@ -581,6 +581,14 @@ class GuildPlayer:
             stderr=errfile,
         )
         source = discord.PCMVolumeTransformer(raw, volume=VOLUME)
+        # Keep our OWN reference to the ffmpeg process. discord.py's AudioPlayer.run() calls the
+        # `after` callback and THEN source.cleanup(), which resets `_process` to its MISSING
+        # sentinel - and our callback only *schedules* the event set, so by the time this
+        # coroutine resumes, reading raw._process would hand back the sentinel (which is not
+        # None, so a `is not None` guard doesn't save you: it has no .poll()).
+        ffmpeg_proc = getattr(raw, "_process", None)
+        if not hasattr(ffmpeg_proc, "poll"):
+            ffmpeg_proc = None
 
         self._finished.clear()
         self._play_error = None
@@ -607,9 +615,24 @@ class GuildPlayer:
         await self._finished.wait()
         elapsed = time.monotonic() - started
 
+        # Diagnostics must never be able to break playback - that is exactly how the
+        # '_MissingSentinel has no attribute poll' bug took down every track it reported on.
+        try:
+            await self._report_playback(track, elapsed, errfile, ffmpeg_proc)
+        except Exception:
+            log.exception(f"Playback diagnostics failed for {track.title!r} (playback itself "
+                          f"was unaffected)")
+
+    async def _report_playback(self, track: Track, elapsed: float, errfile,
+                               ffmpeg_proc) -> None:
+        """Work out whether the track really played, and say so loudly if it didn't."""
         stderr_text = _read_stderr(errfile)
-        proc = getattr(raw, "_process", None)
-        returncode = proc.poll() if proc is not None else None  # poll() so it's actually reaped
+        returncode = None
+        if ffmpeg_proc is not None:
+            try:
+                returncode = ffmpeg_proc.poll()   # poll() so the process is actually reaped
+            except Exception:
+                returncode = None
 
         if self._play_error:
             log.error(f"Audio error on {track.title!r}: {self._play_error}")
