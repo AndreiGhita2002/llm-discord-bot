@@ -192,6 +192,28 @@ server, requester in a channel, queue not full) so callers can bail before payin
 lookup. `PlayResult.started` says whether playback began immediately, which tells the caller
 NOT to post its own line - the player loop already announces "now playing".
 
+**YouTube player client (READ THIS WHEN PLAYBACK BREAKS)**: `voice.player_clients` (default
+`["android"]`) controls which YouTube client yt-dlp impersonates. YouTube ties the media URL it
+hands out to the requesting client, and ffmpeg fetches that URL *separately* with its own
+headers - so most clients give ffmpeg a **403 Forbidden**. yt-dlp's own default (currently
+`ANDROID_VR`) is one of the broken ones. Passing yt-dlp's `http_headers` through to ffmpeg does
+NOT fix it (tested). The symptom is nasty: the bot joins, announces the track, then it vanishes
+from the queue instantly with no audio - because ffmpeg dying on the input looks to discord.py
+like an ordinary end-of-track. If playback breaks after a YouTube change, try other clients
+(`ios`, `tv`, `web_safari`, `mweb`, `web`) - it's config, no code change needed.
+
+**Silent-failure detection**: `_play()` times each track and captures ffmpeg's stderr (to a temp
+FILE, not a PIPE - nothing drains a pipe mid-song, so a chatty stream would fill the 64KB buffer
+and wedge ffmpeg). A track that ends in under `MIN_PLAYBACK_SECONDS` without a deliberate
+skip/stop is logged at ERROR (so it reaches the Discord log channel) and reported in chat.
+`_skip_requested` distinguishes a real failure from `!skip`/`!stop`/`!leave`.
+
+**YouTube error classification**: `classify_youtube_error()` maps yt-dlp errors to a kind
+(`bot-check`, `rate-limited`, `no-format`, `extractor-broken`, `unavailable`, …) plus a chat
+explanation, because each needs a different fix (cookies file / wait / change player_clients /
+upgrade yt-dlp). Anything unrecognised is logged as `unexpected` at ERROR - that's the signal
+YouTube changed in a way this code hasn't seen. "No results" stays at INFO; it isn't a fault.
+
 **Requirements**: `yt-dlp` + `PyNaCl` + `davey` (pip) and `ffmpeg` + libopus (system;
 `brew install ffmpeg` covers both on macOS). All are checked in `configure()` at startup *and*
 per command, so a missing piece degrades to a clear chat message. libopus isn't always on the
@@ -225,7 +247,8 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Blocking web calls fixed: `ollama.web_search`/`web_fetch` are synchronous - they were called directly on the event loop and would freeze the whole bot on a cloud stall. Now offloaded via `asyncio.to_thread` + `asyncio.wait_for(WEB_TIMEOUT)`. They also short-circuit with a friendly message when `OLLAMA_API_KEY` is unset (tool can stay enabled in config). Root cause of the "Ollama error crashes the service" only bites once a key is added; the watchdog covers all other hang sources.
 [x] Voice playback: `!play <song|url>` streams YouTube audio into the caller's voice channel (`voice.py`), with a per-guild queue, skip/stop/leave/pause, idle auto-disconnect and leave-when-alone. See the "Voice Playback" section above.
 [x] Voice close code 4017 (DAVE): fixed by adding the `davey` dependency - see the DAVE note in the Voice Playback section. The host had ffmpeg/PyNaCl/yt-dlp fine (it cleared every `_unavailable_reason()` gate and reached the real voice handshake), it was purely the missing E2EE library.
-[ ] Live-verify voice playback on the deployed bot: after the `davey` fix, confirm audio actually reaches a voice channel. Unit + mock-integration tested (queue order, skip, stop, idle disconnect, all `!play` gating paths) and yt-dlp search/stream-URL resolution verified against real YouTube, but no audio has been pushed to a real voice channel yet. Needs the Connect/Speak permissions.
+[x] Silent playback failure (bot joined, announced, instantly skipped, no audio, no error): yt-dlp's default `ANDROID_VR` client hands out media URLs that ffmpeg gets a 403 on. Fixed with `voice.player_clients: ["android"]` + real failure detection in `_play()`. See the player-client note in the Voice Playback section.
+[ ] Live-verify voice playback on the deployed bot: after the `davey` and player-client fixes, confirm audio actually reaches a voice channel. Unit + mock-integration tested (queue order, skip, stop, idle disconnect, all `!play` gating paths) and yt-dlp search/stream-URL resolution verified against real YouTube, but no audio has been pushed to a real voice channel yet. Needs the Connect/Speak permissions.
 [ ] Standardise the command set: `voice.py` uses `!play`/`!skip`/… but `discord_logging.py` still uses `/setlogchannel` and `/clearlogchannel`, so the bot answers to two different prefixes (`!help` lists both, but it reads as an inconsistency). Settle on one (`!` avoids colliding with Discord's slash-command autocomplete popup) and move the log commands over. Each module still matches its own regex with `on_message` calling them in sequence - worth factoring into one shared dispatcher (name -> handler + help text) so adding a command is a single entry, the way `tools.py` does it. `COMMAND_HELP` is the first step of that: the help text already lives next to each module's regexes.
 [ ] Song queue improvements: the basics are already in (`GuildPlayer.queue`, in-order playback, `!queue`, `!skip`, `max_queue` cap). Missing: playlist/album URLs (`noplaylist: True` currently takes only the first video of a link), shuffle and loop/repeat modes, removing or reordering entries (`!remove <n>`, `!move <from> <to>`), paging for long queues (`!queue` truncates at 10 with no way to see the rest), a "up next" hint when a track ends, and persisting the queue across restarts the way reminders are persisted.
 [x] Expose music to the LLM: the `queue_song` tool lets the model queue tracks ("kronk, put on some jazz"). It routes through `voice.enqueue_request()`, the same path `!play` uses, so the model can't bypass the duration limit, queue cap or permission checks, and it can only ever join the *requester's* current voice channel - never one of its own choosing. Gated off entirely when voice playback isn't available.

@@ -188,6 +188,17 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **Fixed silent playback failure**: the bot would join, announce a track, then instantly drop it
+  with no audio and nothing in the logs. yt-dlp's default YouTube client (`ANDROID_VR`) hands out
+  media URLs that ffmpeg gets a **403 Forbidden** on, and ffmpeg dying on the input looks to
+  discord.py like a normal end-of-track — so whole queues drained in seconds, silently. Fixed via
+  the new `voice.player_clients` setting (default `["android"]`), which is config so it can be
+  changed without a code edit next time YouTube shifts.
+- **Real error reporting for playback**: tracks are timed and ffmpeg's stderr is captured, so a
+  track that ends without playing is logged at ERROR (reaching the Discord log channel) and
+  explained in chat instead of vanishing. Unexpected YouTube responses are classified — bot-check,
+  rate-limited, age-gated, no-format, extractor-broken — each with the fix it implies, and anything
+  unrecognised is logged as `unexpected` so a future YouTube change is loud rather than silent.
 - **`queue_song` tool**: the LLM can now queue music itself — "kronk, put on some jazz" works as
   plain conversation, no command needed. It routes through the same code path as `!play`, so the
   duration limit, queue cap and channel permissions all still apply, and it can only join the

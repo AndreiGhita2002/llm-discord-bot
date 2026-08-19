@@ -31,6 +31,7 @@ import logging
 import random
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -70,6 +71,16 @@ IDLE_TIMEOUT = 300                   # secs with an empty queue before leaving t
 RESOLVE_TIMEOUT = 60                 # hard ceiling on a single yt-dlp resolve
 STREAM_URL_TTL = 1800                # re-resolve a queued track's media URL after this long
 LEAVE_WHEN_ALONE = True              # leave once the last human leaves the voice channel
+# Which YouTube client yt-dlp impersonates when resolving a media URL. This matters a LOT:
+# YouTube ties the URL it hands out to the requesting client, and ffmpeg (which fetches it
+# separately, with its own headers) gets a 403 Forbidden for most of them. yt-dlp's own default
+# currently resolves via ANDROID_VR, whose URLs ffmpeg CANNOT fetch - the symptom is a track
+# that joins, announces, then vanishes from the queue instantly with no audio and no error.
+# Expect to revisit this list whenever YouTube changes things; it is config so it can be fixed
+# without a code change.
+PLAYER_CLIENTS: list[str] = ["android"]
+# A track that "ends" faster than this never really played - see _play().
+MIN_PLAYBACK_SECONDS = 1.5
 
 # ffmpeg flags: -vn drops video; the reconnect flags let it recover from a dropped HTTP
 # stream mid-song instead of ending the track early.
@@ -143,6 +154,12 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
     "error": [
         "Something went wrong with that one: {error}",
     ],
+    "playback_failed": [
+        "⚠️ I couldn't actually play **{title}** — {error}",
+    ],
+    "youtube_error": [
+        "⚠️ YouTube wouldn't give me “{query}” — {error}",
+    ],
 }
 
 _messages: dict[str, list[str]] = {k: list(v) for k, v in DEFAULT_MESSAGES.items()}
@@ -171,6 +188,7 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     """
     global ENABLED, FFMPEG_PATH, OPUS_PATH, COOKIES_FILE, VOLUME, MAX_DURATION_MINUTES
     global MAX_QUEUE, IDLE_TIMEOUT, RESOLVE_TIMEOUT, LEAVE_WHEN_ALONE, _messages
+    global PLAYER_CLIENTS
 
     cfg = cfg or {}
     ENABLED = bool(cfg.get("enabled", True))
@@ -182,6 +200,7 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     MAX_QUEUE = int(cfg.get("max_queue", 20))
     IDLE_TIMEOUT = int(cfg.get("idle_timeout_seconds", 300))
     RESOLVE_TIMEOUT = int(cfg.get("resolve_timeout", 60))
+    PLAYER_CLIENTS = list(cfg.get("player_clients") or ["android"])
     LEAVE_WHEN_ALONE = bool(cfg.get("leave_when_alone", True))
 
     merged = {k: list(v) for k, v in DEFAULT_MESSAGES.items()}
@@ -298,6 +317,8 @@ def _blocking_resolve(target: str) -> dict:
     opts = dict(_YDL_BASE_OPTS)
     if COOKIES_FILE:
         opts["cookiefile"] = COOKIES_FILE
+    if PLAYER_CLIENTS:
+        opts["extractor_args"] = {"youtube": {"player_client": list(PLAYER_CLIENTS)}}
 
     query = target if _URL_RE.match(target) else f"ytsearch1:{target}"
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -325,6 +346,43 @@ def _stream_url_from(info: dict) -> str:
         if fmt.get("acodec") not in (None, "none") and fmt.get("url"):
             return fmt["url"]
     raise LookupError("no playable audio stream")
+
+
+# Known YouTube failure signatures. Each maps a substring of yt-dlp's error text to a short
+# kind (for the log line) and a human explanation (for chat). These are worth distinguishing
+# because they need DIFFERENT fixes: a cookies file, waiting out a rate limit, a yt-dlp upgrade,
+# or a different `player_clients` setting.
+_YT_ERROR_SIGNATURES: tuple[tuple[str, str, str], ...] = (
+    ("sign in to confirm", "bot-check",
+     "YouTube wants me to prove I'm not a bot (set `voice.cookies_file` to fix)"),
+    ("confirm your age", "age-gated", "that video is age-restricted"),
+    ("429", "rate-limited", "YouTube is rate-limiting me - try again in a bit"),
+    ("too many requests", "rate-limited", "YouTube is rate-limiting me - try again in a bit"),
+    ("http error 403", "forbidden", "YouTube refused the request (403)"),
+    ("private video", "unavailable", "that video is private"),
+    ("video unavailable", "unavailable", "that video isn't available"),
+    ("removed by the uploader", "unavailable", "that video was taken down"),
+    ("requested format is not available", "no-format",
+     "no playable audio came back (the `voice.player_clients` setting may need changing)"),
+    ("unable to extract", "extractor-broken",
+     "YouTube changed something yt-dlp can't read yet (yt-dlp probably needs updating)"),
+    ("page needs to be reloaded", "extractor-broken",
+     "YouTube changed something yt-dlp can't read yet (yt-dlp probably needs updating)"),
+)
+
+
+def classify_youtube_error(exc: Exception) -> tuple[str, str]:
+    """Map a yt-dlp exception to (kind, human explanation).
+
+    Anything unrecognised comes back as "unexpected", which is the signal that YouTube changed
+    in a way this code hasn't seen before - worth an ERROR in the log channel rather than a
+    shrug, because it usually means playback is broken for everyone until someone looks.
+    """
+    text = str(exc).lower()
+    for needle, kind, hint in _YT_ERROR_SIGNATURES:
+        if needle in text:
+            return kind, hint
+    return "unexpected", "YouTube gave me an answer I didn't understand"
 
 
 async def resolve_track(target: str, requested_by: str = "") -> Track:
@@ -375,6 +433,7 @@ class GuildPlayer:
         self._task: Optional[asyncio.Task] = None
         self._wakeup = asyncio.Event()    # set when a track is added
         self._finished = asyncio.Event()  # set (from the ffmpeg thread) when a track ends
+        self._skip_requested = False      # so a manual skip isn't misread as a failure
         self._play_error: Optional[Exception] = None
 
     # --- helpers ---
@@ -416,6 +475,7 @@ class GuildPlayer:
     async def disconnect(self) -> None:
         """Stop playback, drop the queue and leave the channel."""
         self.queue.clear()
+        self._skip_requested = True   # a deliberate teardown, not a failed track
         task = self._task
         self._task = None
         if task is not None and not task.done() and task is not asyncio.current_task():
@@ -494,21 +554,34 @@ class GuildPlayer:
 
     async def _play(self, track: Track) -> None:
         """Stream one track to completion (or until skipped)."""
-        await _refresh_stream_url(track)
+        try:
+            await _refresh_stream_url(track)
+        except Exception as e:
+            kind, hint = classify_youtube_error(e)
+            log.error(f"Could not refresh the stream URL for {track.title!r} [{kind}]: "
+                      f"{type(e).__name__}: {str(e)[:300]}")
+            await self._announce(_say("playback_failed", title=track.title, error=hint))
+            return
         vc = self.voice
         if vc is None or not vc.is_connected():
+            log.warning(f"Voice client gone before {track.title!r} could start; dropping it")
             return
 
-        source = discord.FFmpegPCMAudio(
+        # ffmpeg's stderr goes to a temp FILE, not a PIPE: nothing drains a pipe while the track
+        # plays, so a chatty stream could fill the 64KB buffer and wedge ffmpeg mid-song.
+        errfile = tempfile.TemporaryFile()
+        raw = discord.FFmpegPCMAudio(
             track.stream_url,
             executable=FFMPEG_PATH,
             before_options=FFMPEG_BEFORE_OPTIONS,
             options=FFMPEG_OPTIONS,
+            stderr=errfile,
         )
-        source = discord.PCMVolumeTransformer(source, volume=VOLUME)
+        source = discord.PCMVolumeTransformer(raw, volume=VOLUME)
 
         self._finished.clear()
         self._play_error = None
+        self._skip_requested = False
         loop = asyncio.get_running_loop()
 
         def _after(error: Optional[Exception]) -> None:
@@ -516,6 +589,9 @@ class GuildPlayer:
             self._play_error = error
             loop.call_soon_threadsafe(self._finished.set)
 
+        log.info(f"Playing {track.title!r} ({_format_duration(track.duration)}) in "
+                 f"guild {self.guild.id}, requested by {track.requested_by}")
+        started = time.monotonic()
         vc.play(source, after=_after)
         await self._announce(_say(
             "now_playing",
@@ -526,9 +602,59 @@ class GuildPlayer:
             uploader=track.uploader,
         ))
         await self._finished.wait()
+        elapsed = time.monotonic() - started
+
+        stderr_text = _read_stderr(errfile)
+        proc = getattr(raw, "_process", None)
+        returncode = proc.poll() if proc is not None else None  # poll() so it's actually reaped
 
         if self._play_error:
-            log.warning(f"ffmpeg reported an error on {track.title!r}: {self._play_error}")
+            log.error(f"Audio error on {track.title!r}: {self._play_error}")
+
+        # THE IMPORTANT CHECK. When ffmpeg cannot open the stream (an expired or client-mismatched
+        # YouTube URL 403s), it exits immediately and discord.py reports that through `after` as
+        # an ordinary end-of-track. Without this, a whole queue silently drains in seconds with no
+        # audio, no error, and nothing in the logs - which is exactly how this bug hid.
+        if not self._skip_requested and elapsed < MIN_PLAYBACK_SECONDS:
+            detail = _first_error_line(stderr_text) or f"ffmpeg exited with code {returncode}"
+            log.error(
+                f"NO AUDIO for {track.title!r}: ffmpeg ended after {elapsed:.2f}s "
+                f"(rc={returncode}). {detail} | url={track.webpage_url}"
+            )
+            await self._announce(_say("playback_failed", title=track.title, error=detail))
+        elif stderr_text:
+            log.warning(f"ffmpeg warnings on {track.title!r}: {_first_error_line(stderr_text)}")
+        else:
+            log.info(f"Finished {track.title!r} after {elapsed:.0f}s")
+
+
+def _read_stderr(errfile) -> str:
+    """Read back whatever ffmpeg wrote to its stderr file, then close it. Never raises."""
+    try:
+        errfile.seek(0)
+        return errfile.read().decode("utf-8", "replace").strip()
+    except Exception:
+        return ""
+    finally:
+        try:
+            errfile.close()
+        except Exception:
+            pass
+
+
+def _first_error_line(stderr_text: str) -> str:
+    """Pick the most useful line out of an ffmpeg stderr dump for a chat/log message."""
+    if not stderr_text:
+        return ""
+    # Strip ffmpeg's "[https @ 0x7f...]" component/address prefix - pure noise in a chat message.
+    lines = [re.sub(r"^\[[^\]]*@\s*0x[0-9a-f]+\]\s*", "", ln.strip())
+             for ln in stderr_text.splitlines() if ln.strip()]
+    # Prefer a line that names the actual failure over ffmpeg's banner noise.
+    for line in lines:
+        if any(marker in line for marker in ("403", "404", "Error opening", "Forbidden",
+                                             "Invalid data", "Server returned", "No such")):
+            return line[:250]
+    return lines[0][:250] if lines else ""
 
 
 _players: dict[int, GuildPlayer] = {}
@@ -640,13 +766,20 @@ async def enqueue_request(message: discord.Message, query: str) -> PlayResult:
 
     try:
         track = await resolve_track(query, requested_by=message.author.display_name)
+        log.info(f"Resolved {query!r} -> {track.title!r} ({_format_duration(track.duration)})")
     except (asyncio.TimeoutError, TimeoutError):
+        log.error(f"YouTube did not answer within {RESOLVE_TIMEOUT}s for {query!r}")
         return PlayResult(False, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
     except LookupError:
+        log.info(f"No YouTube results for {query!r}")   # a normal outcome, not a fault
         return PlayResult(False, _say("no_results", query=query))
     except Exception as e:
-        log.warning(f"yt-dlp failed for {query!r}: {e}")
-        return PlayResult(False, _say("no_results", query=query))
+        # Anything else means YouTube/yt-dlp behaved unexpectedly. ERROR so it reaches the
+        # Discord log channel: these break playback for everyone until someone intervenes.
+        kind, hint = classify_youtube_error(e)
+        log.error(f"Unexpected YouTube response resolving {query!r} [{kind}]: "
+                  f"{type(e).__name__}: {str(e)[:400]}")
+        return PlayResult(False, _say("youtube_error", query=query, error=hint))
 
     limit_seconds = MAX_DURATION_MINUTES * 60
     if limit_seconds and track.duration and track.duration > limit_seconds:
@@ -735,6 +868,7 @@ async def _cmd_skip(message: discord.Message, player: GuildPlayer) -> None:
         await message.reply(_say("nothing_playing"))
         return
     title = player.current.title
+    player._skip_requested = True
     vc.stop()  # fires the `after` callback -> the loop moves to the next track
     await message.reply(_say("skipped", title=title))
 
@@ -745,6 +879,7 @@ async def _cmd_stop(message: discord.Message, player: GuildPlayer) -> None:
         await message.reply(_say("nothing_playing"))
         return
     player.queue.clear()
+    player._skip_requested = True
     if vc and (vc.is_playing() or vc.is_paused()):
         vc.stop()
     await message.reply(_say("stopped"))

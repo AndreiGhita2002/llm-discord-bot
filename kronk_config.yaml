@@ -177,6 +177,12 @@ voice:
   idle_timeout_seconds: 300
   # Hard ceiling on a single yt-dlp lookup (it's a blocking network call, run off-loop).
   resolve_timeout: 60
+  # Which YouTube client yt-dlp impersonates when resolving the media URL. YouTube ties the URL
+  # to the requesting client and ffmpeg fetches it separately, so most clients give ffmpeg a 403
+  # (symptom: bot joins, announces the track, then instantly skips it in silence). yt-dlp's own
+  # default (ANDROID_VR) is one of the broken ones. If playback breaks after a YouTube change,
+  # try: android, ios, tv, web_safari, mweb, web.
+  player_clients: ["android"]
   # Leave as soon as the last human leaves the voice channel.
   leave_when_alone: true
 
@@ -210,6 +216,8 @@ voice:
       - "Hmm. Searched high and low, found zilch for “{query}”. Weird."
     too_long:
       - "Whoa, {duration}?! That's a whole afternoon. My limit's {limit}."
+    playback_failed:
+      - "⚠️ Uh oh. I found **{title}** but couldn't actually play it — {error}"
 
 # Tool calling
 # The main model natively decides when to call tools, runs them, and can chain calls.
