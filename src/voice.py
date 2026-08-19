@@ -296,6 +296,10 @@ class Track:
     uploader: str = ""
     requested_by: str = ""
     resolved_at: float = field(default_factory=time.time)
+    # Set when someone else is already announcing this track with its link (the LLM tool path
+    # puts "🎶 Now playing: <title> <url>" in the model's reply), so the player loop must not
+    # post its own now-playing line as well - that's the same track announced twice.
+    suppress_announce: bool = False
 
 
 def _format_duration(seconds: Optional[int]) -> str:
@@ -604,14 +608,18 @@ class GuildPlayer:
                  f"guild {self.guild.id}, requested by {track.requested_by}")
         started = time.monotonic()
         vc.play(source, after=_after)
-        await self._announce(_say(
-            "now_playing",
-            title=track.title,
-            duration=_format_duration(track.duration),
-            user=track.requested_by,
-            url=track.webpage_url,
-            uploader=track.uploader,
-        ))
+        if track.suppress_announce:
+            log.info(f"Not posting a now-playing line for {track.title!r} - the reply that "
+                     f"queued it already carries the title and link")
+        else:
+            await self._announce(_say(
+                "now_playing",
+                title=track.title,
+                duration=_format_duration(track.duration),
+                user=track.requested_by,
+                url=track.webpage_url,
+                uploader=track.uploader,
+            ))
         await self._finished.wait()
         elapsed = time.monotonic() - started
 
@@ -856,6 +864,12 @@ async def enqueue_request(message: discord.Message, query: str,
     if not already_in:
         log.info(f"[{source}] connected to #{channel.name}; voice_client="
                  f"{'up' if player.is_active() else 'DOWN (unexpected)'}")
+
+    # Tracks queued by the LLM tool are announced in the model's reply (title + link), so the
+    # player loop stays silent for them however long they sit in the queue - one announcement,
+    # not two. `!play` is unaffected: its caller deletes its own placeholder and relies on the
+    # player loop's now-playing line.
+    track.suppress_announce = (source == "tool")
 
     position = player.enqueue(track)
     player.start()

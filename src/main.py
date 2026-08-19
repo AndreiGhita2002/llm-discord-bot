@@ -493,6 +493,26 @@ def format_queued_songs(ctx: ToolContext) -> str:
 
 
 async def _formulate_and_reply(message: discord.Message, ref_msg):
+    """Reply to `message`, guaranteeing that any tool-queued track gets announced.
+
+    A track queued by the queue_song tool is announced ONLY in the model's reply - voice.py's
+    player loop deliberately stays silent for it so the link isn't posted twice. That means if
+    the reply never happens (Ollama timeout, API error, empty response, an unexpected crash),
+    the music would start with nothing said at all. This wrapper closes that hole.
+    """
+    ctx = ToolContext(message=message, client=client, model=MODEL)
+    try:
+        await _generate_reply(message, ref_msg, ctx)
+    finally:
+        if ctx.queued_songs and not ctx.music_announced:
+            log.warning("Reply never went out, but music was queued - announcing it directly")
+            try:
+                await message.reply(format_queued_songs(ctx))
+            except Exception as e:
+                log.error(f"Could not announce the queued track: {e}")
+
+
+async def _generate_reply(message: discord.Message, ref_msg, ctx: ToolContext):
     """Fetch context, query the model (with tools), and send Kronk's reply.
 
     Runs under a per-channel lock (see on_message) so concurrent messages in the same channel
@@ -536,7 +556,6 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
                 thinking_msg = None
 
         # Query the LLM (ctx lets tools act on the server: react, set status, etc.)
-        ctx = ToolContext(message=message, client=client, model=MODEL)
         try:
             response = await query_ollama(messages, memory_context=memory_context, ctx=ctx)
         except TimeoutError:
@@ -582,9 +601,11 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
             chunks = [body[i : i + 2000] for i in range(0, len(body), 2000)]
             for chunk in chunks:
                 await message.reply(chunk)
+        ctx.music_announced = bool(music_line)
     elif music_line:
         # The model chose to stay quiet, but it DID put music on - that still needs saying.
         await message.reply(music_line)
+        ctx.music_announced = True
 
     overall_elapsed = time.time() - overall_start
     print(f"[TIMING] Overall response: {overall_elapsed:.2f}s")

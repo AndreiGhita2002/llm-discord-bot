@@ -46,6 +46,9 @@ class ToolContext:
     # model has written its reply and appends a link line, so the URL is guaranteed to be there
     # rather than depending on the model remembering to include it.
     queued_songs: list[tuple[str, str]] = field(default_factory=list)
+    # Set once the reply carrying the track line has actually been sent, so the caller knows
+    # whether it still needs to announce the music itself.
+    music_announced: bool = False
 
 
 @dataclass

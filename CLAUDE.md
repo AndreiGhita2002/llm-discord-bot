@@ -185,6 +185,16 @@ join and immediately leave.
 Queued tracks re-resolve their media URL if it's older than `STREAM_URL_TTL` (30 min), because
 YouTube's direct URLs expire.
 
+**Exactly one announcement per track**. Two things can announce a track and they must never
+both fire: the player loop's `now_playing` post, and the `🎶 Now playing: <title> <url>` line
+appended to the model's reply. So `Track.suppress_announce` is set for every tool-queued track
+and the player loop stays silent for it, however long it waits in the queue - the LLM reply is
+the only announcement. The reverse hole matters just as much: if the reply never goes out
+(Ollama timeout/error, empty response, a crash), the music would start with nothing said at
+all, so `_formulate_and_reply()` is a thin wrapper whose `finally` posts the line itself unless
+`ctx.music_announced` says it already went. `!play` is untouched - it has no LLM reply, so the
+player loop announces as before.
+
 **Track links in LLM replies**: when `queue_song` runs, it records `(title, url)` on
 `ToolContext.queued_songs`, and `main.format_queued_songs()` appends a
 `🎶 Now playing: <title> <url>` line to Kronk's reply after the model has written it. Done in
