@@ -480,6 +480,18 @@ async def on_error(event_method: str, *args, **kwargs):
     log.exception(f"Unhandled error in {event_method}")
 
 
+def format_queued_songs(ctx: ToolContext) -> str:
+    """Render the trailing "now playing" line(s) for anything the queue_song tool queued.
+
+    A bare URL (not a markdown masked link) is deliberate: Discord only renders `[text](url)`
+    inside embeds, so in a normal message a plain URL is what actually gives you a clickable
+    link and a video preview card.
+    """
+    if not ctx or not ctx.queued_songs:
+        return ""
+    return "\n".join(f"\U0001F3B6 Now playing: {title} {url}" for title, url in ctx.queued_songs)
+
+
 async def _formulate_and_reply(message: discord.Message, ref_msg):
     """Fetch context, query the model (with tools), and send Kronk's reply.
 
@@ -556,14 +568,23 @@ async def _formulate_and_reply(message: discord.Message, ref_msg):
     response = strip_thinking(response)
     response = strip_message_prefix(response)
 
+    # If a tool queued music this turn, append the track link ourselves. Done in code, not by
+    # asking the model to include it: "always" has to mean always, and a model told to end with
+    # an exact line will drop it, paraphrase it, or hallucinate a URL often enough to matter.
+    music_line = format_queued_songs(ctx)
+
     # Send the reply first
     if "<ignore>" not in response:
-        if len(response) <= 2000:
-            await message.reply(response)
+        body = f"{response.rstrip()}\n\n{music_line}" if music_line else response
+        if len(body) <= 2000:
+            await message.reply(body)
         else:
-            chunks = [response[i : i + 2000] for i in range(0, len(response), 2000)]
+            chunks = [body[i : i + 2000] for i in range(0, len(body), 2000)]
             for chunk in chunks:
                 await message.reply(chunk)
+    elif music_line:
+        # The model chose to stay quiet, but it DID put music on - that still needs saying.
+        await message.reply(music_line)
 
     overall_elapsed = time.time() - overall_start
     print(f"[TIMING] Overall response: {overall_elapsed:.2f}s")

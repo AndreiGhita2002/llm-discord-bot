@@ -21,7 +21,7 @@ import time
 import urllib.parse
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
@@ -42,6 +42,10 @@ class ToolContext:
     message: Optional[discord.Message] = None
     client: Optional[discord.Client] = None
     model: Optional[str] = None
+    # Songs queued by tools during this turn, as (title, url). main.py reads this AFTER the
+    # model has written its reply and appends a link line, so the URL is guaranteed to be there
+    # rather than depending on the model remembering to include it.
+    queued_songs: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -269,10 +273,14 @@ async def _queue_song(args: dict, ctx: ToolContext) -> str:
     if not query:
         return "No song was given, so nothing was queued."
     print(f"[TOOL] queue_song: {query}")
-    result = await voice.enqueue_request(ctx.message, query)
+    result = await voice.enqueue_request(ctx.message, query, source="tool")
     if not result.ok:
         return f"Could not queue it: {result.message}"
-    return result.message
+    if result.url:
+        ctx.queued_songs.append((result.title, result.url))
+    # The link is appended to the reply by main.py, so tell the model not to invent its own.
+    return (f"{result.message} (the track link is appended to your reply automatically - "
+            f"do not repeat the URL yourself)")
 
 
 # ======================================================================================

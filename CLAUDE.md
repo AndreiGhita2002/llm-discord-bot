@@ -185,12 +185,25 @@ join and immediately leave.
 Queued tracks re-resolve their media URL if it's older than `STREAM_URL_TTL` (30 min), because
 YouTube's direct URLs expire.
 
-**One entry point**: `enqueue_request(message, query) -> PlayResult` is the single path for
+**Track links in LLM replies**: when `queue_song` runs, it records `(title, url)` on
+`ToolContext.queued_songs`, and `main.format_queued_songs()` appends a
+`🎶 Now playing: <title> <url>` line to Kronk's reply after the model has written it. Done in
+code deliberately - a model instructed to end with an exact line will drop it, paraphrase it or
+invent a URL often enough to matter, and "always" has to mean always. The tool result tells the
+model the link is added for it, so it doesn't repeat it. The line is still posted when the model
+answers `<ignore>`. (A bare URL, not `[text](url)`: masked links only render inside embeds.)
+
+**One entry point**: `enqueue_request(message, query, source=...) -> PlayResult` is the single path for
 "resolve, join, queue", used by BOTH `!play` and the `queue_song` tool - so limits and checks
 can't drift between them. `play_precheck()` holds the cheap checks (voice available, in a
 server, requester in a channel, queue not full) so callers can bail before paying for a yt-dlp
 lookup. `PlayResult.started` says whether playback began immediately, which tells the caller
-NOT to post its own line - the player loop already announces "now playing".
+NOT to post its own line - the player loop already announces "now playing". `source`
+("command"/"tool") tags every log line, so when one route works and the other doesn't the logs
+say which was running - and every rejection (not in voice, no permission, handshake timeout) is
+logged at WARNING/ERROR so it reaches the Discord log channel instead of being paraphrased away
+by the model. `connect()` is bounded by `CONNECT_TIMEOUT`; on the tool path a hanging handshake
+would otherwise stall the whole agentic loop.
 
 **YouTube player client (READ THIS WHEN PLAYBACK BREAKS)**: `voice.player_clients` (default
 `["android"]`) controls which YouTube client yt-dlp impersonates. YouTube ties the media URL it

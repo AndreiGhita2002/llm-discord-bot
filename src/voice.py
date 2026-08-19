@@ -81,6 +81,9 @@ LEAVE_WHEN_ALONE = True              # leave once the last human leaves the voic
 PLAYER_CLIENTS: list[str] = ["android"]
 # A track that "ends" faster than this never really played - see _play().
 MIN_PLAYBACK_SECONDS = 1.5
+# Ceiling on the voice handshake. Matters most on the LLM tool path: a hanging connect there
+# stalls the whole agentic loop and burns the model's request timeout instead of failing fast.
+CONNECT_TIMEOUT = 30.0
 
 # ffmpeg flags: -vn drops video; the reconnect flags let it recover from a dropped HTTP
 # stream mid-song instead of ending the track early.
@@ -615,7 +618,9 @@ class GuildPlayer:
         # YouTube URL 403s), it exits immediately and discord.py reports that through `after` as
         # an ordinary end-of-track. Without this, a whole queue silently drains in seconds with no
         # audio, no error, and nothing in the logs - which is exactly how this bug hid.
-        if not self._skip_requested and elapsed < MIN_PLAYBACK_SECONDS:
+        # `duration is None` means a livestream, which should never end this fast either.
+        expected_to_run = track.duration is None or track.duration > MIN_PLAYBACK_SECONDS
+        if not self._skip_requested and expected_to_run and elapsed < MIN_PLAYBACK_SECONDS:
             detail = _first_error_line(stderr_text) or f"ffmpeg exited with code {returncode}"
             log.error(
                 f"NO AUDIO for {track.title!r}: ffmpeg ended after {elapsed:.2f}s "
@@ -732,6 +737,7 @@ class PlayResult:
     message: str           # human-readable line: safe to post in chat OR hand back to the model
     started: bool = False  # went straight to playing (the player loop announces that itself)
     title: str = ""
+    url: str = ""          # the YouTube page URL, so callers can link the track
     position: int = 0
 
 
@@ -749,15 +755,32 @@ def play_precheck(message: discord.Message) -> Optional[str]:
     return None
 
 
-async def enqueue_request(message: discord.Message, query: str) -> PlayResult:
+async def enqueue_request(message: discord.Message, query: str,
+                          source: str = "command") -> PlayResult:
     """Resolve `query`, join the requester's voice channel and queue it.
 
     This is the ONE path used by both `!play` and the LLM's queue_song tool, so the two can't
     drift apart on the things that matter: duration limits, the queue cap, channel permissions
     and stale-stream-URL handling. Callers differ only in how they report the result.
+
+    `source` ("command" or "tool") only tags the log lines - when one route works and the other
+    doesn't, the logs need to say which one was running.
     """
+    author = getattr(message.author, "display_name", "?")
+    guild_id = getattr(message.guild, "id", None)
+    log.info(f"[{source}] play request {query!r} from {author} in guild {guild_id}")
+
     error = play_precheck(message)
     if error:
+        # WARNING (not debug) on purpose: this reaches the Discord log channel, and "the bot
+        # just didn't join" is otherwise invisible - the model paraphrases the refusal away.
+        state = getattr(message.author, "voice", None)
+        log.warning(
+            f"[{source}] request rejected before lookup: {error!r} "
+            f"(author={author}, voice_state={'present' if state else 'None'}, "
+            f"channel={getattr(getattr(state, 'channel', None), 'id', None)}, "
+            f"guild={guild_id})"
+        )
         return PlayResult(False, error)
 
     channel = _author_voice_channel(message)
@@ -790,22 +813,37 @@ async def enqueue_request(message: discord.Message, query: str) -> PlayResult:
             title=track.title,
         ))
 
+    already_in = player.is_active()
+    log.info(f"[{source}] {'already connected' if already_in else 'joining'} voice channel "
+             f"#{channel.name} ({channel.id})")
     try:
-        await player.connect(channel)
+        await asyncio.wait_for(player.connect(channel), timeout=CONNECT_TIMEOUT)
     except PermissionError as e:
+        log.warning(f"[{source}] missing voice permissions for #{channel.name}: {e}")
         return PlayResult(False, str(e))
+    except (asyncio.TimeoutError, TimeoutError):
+        log.error(f"[{source}] voice handshake to #{channel.name} ({channel.id}) timed out "
+                  f"after {CONNECT_TIMEOUT:.0f}s - not joining")
+        return PlayResult(False, f"I couldn't get into {channel.name} - the voice connection "
+                                 f"timed out.")
     except Exception as e:
-        log.warning(f"Could not join voice channel {channel.id}: {e}")
+        log.exception(f"[{source}] failed to join voice channel #{channel.name} "
+                      f"({channel.id}): {type(e).__name__}: {e}")
         return PlayResult(False, f"I couldn't join {channel.name}: {e}")
+    if not already_in:
+        log.info(f"[{source}] connected to #{channel.name}; voice_client="
+                 f"{'up' if player.is_active() else 'DOWN (unexpected)'}")
 
     position = player.enqueue(track)
     player.start()
+    log.info(f"[{source}] queued {track.title!r} at position {position} "
+             f"(currently playing: {player.current.title if player.current else 'nothing'})")
 
     # Position 1 with nothing playing means the player loop is about to post its own
     # "now playing" line, so the caller must not repeat it.
     if position == 1 and player.current is None:
         return PlayResult(True, f"Now playing: {track.title}", started=True,
-                          title=track.title, position=position)
+                          title=track.title, url=track.webpage_url, position=position)
     return PlayResult(True, _say(
         "queued",
         title=track.title,
@@ -813,7 +851,7 @@ async def enqueue_request(message: discord.Message, query: str) -> PlayResult:
         position=position,
         url=track.webpage_url,
         uploader=track.uploader,
-    ), title=track.title, position=position)
+    ), title=track.title, url=track.webpage_url, position=position)
 
 
 async def _delete_quietly(msg) -> None:
@@ -844,7 +882,7 @@ async def _cmd_play(message: discord.Message, query: str) -> None:
     except Exception:
         pass
 
-    result = await enqueue_request(message, query)
+    result = await enqueue_request(message, query, source="command")
     if result.started:
         await _delete_quietly(status)   # the player loop posts "now playing" instead
     else:

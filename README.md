@@ -188,6 +188,12 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 
 ### v0.2.3
 
+- **Track links in replies**: when the LLM queues music, its reply now always ends with
+  `🎶 Now playing: <title> <url>`, appended in code rather than left to the model to remember.
+- **Diagnosable voice joins**: every play request is logged with its route (`[command]` vs
+  `[tool]`), and refusals — not in a voice channel, missing Connect/Speak, handshake timeout —
+  are logged at WARNING/ERROR so they reach the Discord log channel rather than being
+  paraphrased away by the model. Joining is now bounded by a 30s timeout.
 - **Fixed silent playback failure**: the bot would join, announce a track, then instantly drop it
   with no audio and nothing in the logs. yt-dlp's default YouTube client (`ANDROID_VR`) hands out
   media URLs that ffmpeg gets a **403 Forbidden** on, and ffmpeg dying on the input looks to
