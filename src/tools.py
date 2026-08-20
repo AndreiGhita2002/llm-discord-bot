@@ -492,8 +492,9 @@ _REGISTRY: list[Tool] = [
     # --- web ---
     Tool("web_search", _fn(
         "web_search",
-        "Search the web for current/up-to-date information. Use only when the user asks to "
-        "look something up or needs recent info; it is an intensive operation.",
+        "Search the web. Call this for any factual question that isn't plain common knowledge "
+        "- current events, niche or technical topics, anything the user asks you to check or "
+        "verify. Do NOT call it for opinions, preferences, banter or questions about yourself.",
         {"query": {"type": "string", "description": "The search query"}}, ["query"],
     ), _web_search, needs_api_key=True),
     Tool("web_fetch", _fn(
@@ -517,7 +518,10 @@ _REGISTRY: list[Tool] = [
                      "description": "Options to choose from."}}, ["options"],
     ), _random_choice),
     Tool("set_reminder", _fn(
-        "set_reminder", "Remind the user of something after a delay, by pinging them later.",
+        "set_reminder",
+        "Ping the user about something after a delay. Call this whenever someone asks to be "
+        "reminded, nudged, poked or woken at a later time. Saying you will remind them does "
+        "nothing - only this tool schedules it.",
         {"minutes": {"type": "number", "description": "Minutes from now to send the reminder."},
          "text": {"type": "string", "description": "What to remind them about."}},
         ["minutes", "text"],
@@ -533,7 +537,9 @@ _REGISTRY: list[Tool] = [
 
     # --- knowledge / utility ---
     Tool("wikipedia", _fn(
-        "wikipedia", "Look up a topic on Wikipedia and get a short summary.",
+        "wikipedia",
+        "Look up a topic on Wikipedia. Prefer this over web_search for encyclopedic subjects - "
+        "people, places, history, science, films - where a summary answers the question.",
         {"query": {"type": "string", "description": "The topic or article title."}}, ["query"],
     ), _wikipedia),
     Tool("calculator", _fn(
@@ -560,11 +566,15 @@ _REGISTRY: list[Tool] = [
         {"emoji": {"type": "string", "description": "A single emoji, e.g. 😂 or 👍"}}, ["emoji"],
     ), _add_reaction, needs_discord=True),
     Tool("set_status", _fn(
-        "set_status", "Change your own 'Playing …' status to reflect your mood or activity.",
+        "set_status",
+        "Change your own 'Playing ...' status. Call this whenever someone asks you to set or "
+        "change your status. Describing the new status in your reply does nothing.",
         {"text": {"type": "string", "description": "The status text."}}, ["text"],
     ), _set_status, needs_discord=True),
     Tool("set_nickname", _fn(
-        "set_nickname", "Change your own nickname in this server.",
+        "set_nickname",
+        "Change your own nickname in this server. Call this whenever someone asks you to "
+        "change, switch or update your name. Writing the new name in your reply does nothing.",
         {"nickname": {"type": "string", "description": "The new nickname."}}, ["nickname"],
     ), _set_nickname, needs_discord=True),
     Tool("get_user_info", _fn(
@@ -572,19 +582,26 @@ _REGISTRY: list[Tool] = [
         {"user_id": {"type": "string", "description": "The numeric Discord user id."}}, ["user_id"],
     ), _get_user_info, needs_discord=True),
     Tool("create_poll", _fn(
-        "create_poll", "Create a native Discord poll with a question and options.",
+        "create_poll",
+        "Post a real Discord poll people can vote in. Call this whenever someone asks for a "
+        "poll or a vote. Listing the options in your reply is not a poll.",
         {"question": {"type": "string", "description": "The poll question."},
          "options": {"type": "array", "items": {"type": "string"},
                      "description": "2-10 answer options."}}, ["question", "options"],
     ), _create_poll, needs_discord=True),
     Tool("start_thread", _fn(
-        "start_thread", "Start a thread off the user's message to branch a tangent.",
+        "start_thread",
+        "Start a real thread off the user's message. Call this whenever someone asks for a "
+        "thread or to move a tangent out of the channel. Suggesting one is not starting one.",
         {"name": {"type": "string", "description": "The thread name."}}, ["name"],
     ), _start_thread, needs_discord=True),
 
     # --- memory ---
     Tool("remember_fact", _fn(
-        "remember_fact", "Deliberately remember a fact about a user for the future.",
+        "remember_fact",
+        "Store a fact about a user so you still know it in future conversations. Call this "
+        "whenever someone tells you to remember something. Saying you will remember does "
+        "nothing - only this tool saves it.",
         {"user_id": {"type": "string", "description": "The numeric Discord user id."},
          "fact": {"type": "string", "description": "The fact to remember."}}, ["user_id", "fact"],
     ), _remember_fact, needs_memory=True),
