@@ -548,7 +548,15 @@ _REGISTRY: list[Tool] = [
 
     # --- embodiment / presence ---
     Tool("add_reaction", _fn(
-        "add_reaction", "React to the user's message with an emoji to express emotion.",
+        "add_reaction",
+        # Reactions are the one action the model can convincingly fake: typing 🔥 in a reply
+        # LOOKS like reacting, so it does that instead of calling this (production returned
+        # "🔥 (done!)" with no call, and this is the weakest action tool by a wide margin in
+        # the evals). Nobody can type a poll or a rename, which is why those tools need no
+        # such warning and this one does.
+        "Add an emoji reaction to the user's message. Call this whenever you are asked to "
+        "react, or when a reaction expresses your feeling better than words. Typing an emoji "
+        "in your reply is NOT a reaction and does nothing - only this tool adds one.",
         {"emoji": {"type": "string", "description": "A single emoji, e.g. 😂 or 👍"}}, ["emoji"],
     ), _add_reaction, needs_discord=True),
     Tool("set_status", _fn(

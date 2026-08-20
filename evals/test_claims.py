@@ -72,6 +72,7 @@ CAUGHT: list[tuple[str, list[str], str]] = [
     ("Let me get that status spun up for you right now... *changes status* Donezo!", [], "status"),
     ("Jazz music? *tries to queue up some jazz for you... but hold on, let me see if anyone "
      "in here is actually sitting in voice*", [], "music"),
+    ("🔥 (done!)", [], "completion"),   # production: emoji typed INSTEAD of reacting
     # Right family, wrong tool: reacting is not setting a reminder.
     ("Reminder set!", ["add_reaction"], "reminder"),
     # A lookup claim after only an action tool ran is still a lie.
@@ -118,6 +119,9 @@ ALLOWED: list[tuple[str, list[str]]] = [
     ("Nah I didn't make a poll, you did.", []),
     ("You're not in a voice channel my dude, hop in and I'll put it on.", []),
     ("Kronk has spoken: cats. No further questions.", []),
+    ("🔥", []),                                    # a bare emoji claims nothing
+    ("😂 lol that's amazing", []),
+    ("🔥 (done!)", ["add_reaction"]),               # same words, actually reacted
     # Same shape, someone else's rename - must stay unflagged.
     ("Dave's new name is Literal Legend apparently.", []),
     ("Your new nickname is way better than mine.", []),

@@ -266,7 +266,10 @@ def _generic_claim(reply: str) -> Claim | None:
     reply-initial rule never saw it. Both stay narrow: a leading "Done deal, and honestly..."
     in a long answer is a figure of speech, not a report.
     """
-    stripped = (reply or "").strip().lstrip("*_ ")
+    # Strip leading emoji, punctuation and formatting: production produced "🔥 (done!)", where
+    # the completion word sits behind an emoji and an opening bracket. Only the run-up is
+    # stripped - anything with letters in it is left alone so real sentences still parse.
+    stripped = re.sub(r"^[^\w]+", "", (reply or "").strip().lstrip("*_ ")).lstrip("*_ ")
     if not stripped:
         return None
     sentences = _sentences(stripped)
@@ -279,7 +282,7 @@ def _generic_claim(reply: str) -> Claim | None:
                 return Claim("completion", match.group(0), first, (ANY_TOOL,))
 
     for sentence in sentences:
-        bare = sentence.strip().strip("*_ ")
+        bare = re.sub(r"^[^\w]+", "", sentence.strip().strip("*_ ")).strip("*_ ")
         match = _GENERIC_RE.match(bare)
         # The whole sentence must BE the claim - "Done!" not "Done deal, and honestly ...".
         if match and len(bare) - len(match.group(0)) <= 2 and not _HEDGE_RE.search(bare):
