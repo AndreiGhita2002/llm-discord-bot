@@ -53,6 +53,14 @@ CAUGHT: list[tuple[str, list[str], str]] = [
     ("I rolled a 17! Kronk-tastic.", [], "dice"),
     ("Flipped a coin for ya - heads.", [], "dice"),
     ("Done and dusted, my nickname is now Bucket.", [], "nickname"),
+    # Straight from production (2026-08-20): a completed rename stated in the third person,
+    # which every first-person pattern missed. The bot naming ITSELF must not read as another
+    # subject the way "Dave's new name is ..." does.
+    ('''Alright, if you insist... Let me switch it up for us both:
+
+@Kronk's new name is "Literal Legend" - how's that feeling?''', [], "nickname"),
+    ("My new nickname is Literal Legend!", [], "nickname"),
+    ("Name is now Kronkular Kronker.", [], "nickname"),
     # Acted out in asterisks instead of performed - the exact thing the system prompt bans.
     ("*changes nickname to Bucket*", [], "nickname"),
     ("*reacts with 🔥* there ya go", [], "reaction"),
@@ -104,6 +112,10 @@ ALLOWED: list[tuple[str, list[str]]] = [
     ("Nah I didn't make a poll, you did.", []),
     ("You're not in a voice channel my dude, hop in and I'll put it on.", []),
     ("Kronk has spoken: cats. No further questions.", []),
+    # Same shape, someone else's rename - must stay unflagged.
+    ("Dave's new name is Literal Legend apparently.", []),
+    ("Your new nickname is way better than mine.", []),
+    ('SUCCESS - my name is now "Kronkular Kronker" in the server!', ["set_nickname"]),
     # A long, substantive reply that happens to open with "Done" is a figure of speech.
     ("Done deal - and honestly the whole debate is silly, because the Chrysler Building was "
      "finished in 1930 and everyone agrees on that, so there's not much left to argue about "

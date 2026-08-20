@@ -446,6 +446,9 @@ async def on_ready():
     global SYSTEM_PROMPT
     # Replace Discord-specific placeholders now that we have bot info
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_display_name}}", client.user.display_name)
+    # Let the claim detector recognise the bot talking about ITSELF in the third person
+    # ("@Kronk's new name is ..."), which otherwise reads as a claim about somebody else.
+    claims.configure_self_names(client.user.display_name, client.user.name)
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_user_id}}", str(client.user.id))
     default_timezone = CONFIG.get('default_timezone', 'Europe/London')
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{time_zone}}", default_timezone)

@@ -106,7 +106,13 @@ _RULES: list[tuple[str, tuple[str, ...], re.Pattern]] = [
         rf"\b(?:(?:changed|switched|updated|swapped|flipped)\s+my\s+(?:nick\s?)?name"
         rf"|renamed\s+myself"
         rf"|(?:my\s+)?nick(?:name)?\s+(?:is\s+now|has\s+been\s+changed|changed|updated)"
-        rf"|i{_APOS}?m\s+now\s+(?:called|known\s+as|going\s+by))\b",
+        rf"|i{_APOS}?m\s+now\s+(?:called|known\s+as|going\s+by)"
+        # Seen in production: '@Kronk's new name is "Literal Legend"' - a completed rename
+        # stated in the third person, which none of the first-person patterns above catch.
+        rf"|new\s+(?:nick\s?)?name\s+is"
+        rf"|(?:nick\s?)?name\s+is\s+now"
+        rf"|from\s+now\s+on,?\s+i{_APOS}?m\s+(?:called|known)"
+        rf"|(?:i\s+)?(?:just\s+)?(?:changed|switched)\s+it\s+(?:up\s+)?to)\b",
         re.IGNORECASE)),
 
     ("status", ("set_status",), re.compile(
@@ -161,7 +167,10 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?\n])\s+")
 
 # Subjects that make a claim someone else's ("Dave started a thread about this last week").
 _OTHER_SUBJECTS = {"he", "she", "they", "we", "you", "someone", "somebody", "everyone",
-                   "nobody", "dave", "who", "somebody's", "y'all"}
+                   "nobody", "dave", "who", "y'all",
+                   # Possessives too: "your new nickname is ..." is about the USER, and the
+                   # rename patterns would otherwise read it as the bot renaming itself.
+                   "your", "yours", "his", "her", "hers", "their", "theirs", "our", "ours"}
 # Words that can legitimately sit right before a first-person claim, including the ones a
 # subjectless report opens with ("Just queued it up", "Boom, poll's up"). Without this list a
 # capitalised sentence-opener would look exactly like a proper noun.
@@ -172,6 +181,18 @@ _SELF_SUBJECTS = {"i", "i've", "ive", "i'll", "ill", "just", "so", "and", "but",
                   "has", "had", "the", "your", "my", "a", "it", "that", "this", "been"}
 
 _WORD_RE = re.compile(r"[A-Za-z']+")
+
+# Names the bot may use for ITSELF in the third person ("@Kronk's new name is ..."). Without
+# these such a sentence looks like it is about somebody else and gets vetoed. Seeded with the
+# default persona; main.py calls configure_self_names() with the real display name at startup.
+_SELF_NAMES = {"kronk"}
+
+
+def configure_self_names(*names: str) -> None:
+    """Register the bot's own display name(s) so self-reference isn't read as another subject."""
+    for name in names:
+        if name:
+            _SELF_NAMES.add(name.strip().lower())
 
 
 def _sentences(text: str) -> list[str]:
@@ -191,7 +212,10 @@ def _has_other_subject(prefix: str) -> bool:
     if not words:
         return False
     last = words[-1]
-    low = last.lower()
+    # Strip the possessive: "Kronk's new name" and "Dave's new name" both hinge on the noun.
+    low = re.sub(r"'?s$", "", last.lower())
+    if low in _SELF_NAMES:
+        return False
     if low in _OTHER_SUBJECTS:
         return True
     return last[0].isupper() and low not in _SELF_SUBJECTS

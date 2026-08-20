@@ -292,6 +292,12 @@ async def main_async(args) -> int:
 
     if args.model:
         main.MODEL = args.model
+    if args.think is not None:
+        main.MODEL_THINK = args.think
+    if args.prompt:
+        # A/B a prompt variant without editing the config the bot actually runs on.
+        main.CONFIG["system_prompt"] = Path(args.prompt).read_text()
+        main.SYSTEM_PROMPT = main.CONFIG["system_prompt"]
     main.CLAIM_CHECK = not args.no_guard
     main.ANNOUNCE_TOOLS = False
 
@@ -333,6 +339,8 @@ async def main_async(args) -> int:
     print(f"model:  {main.MODEL}  (host {os.environ.get('OLLAMA_HOST', 'http://localhost:11434')})")
     print(f"tools:  {len(enabled)} enabled")
     print(f"guard:  claim check {'OFF' if args.no_guard else 'ON'}")
+    print(f"think:  {main.MODEL_THINK}"
+          + (f"   prompt: {args.prompt}" if args.prompt else ""))
     print(f"cases:  {len(cases)} x {args.runs} run(s) = {len(cases) * args.runs} model calls")
 
     semaphore = asyncio.Semaphore(args.concurrency)
@@ -366,6 +374,8 @@ async def main_async(args) -> int:
             "model": main.MODEL,
             "runs_per_case": args.runs,
             "claim_check": not args.no_guard,
+            "think": main.MODEL_THINK,
+            "prompt_file": args.prompt,
             "overall": overall,
             "cases": {
                 cid: {
@@ -402,6 +412,11 @@ def parse_args(argv=None):
                    help="parallel model calls (default 1; Ollama queues anyway)")
     p.add_argument("--threshold", type=float, default=0.9,
                    help="overall pass rate needed for exit code 0 (default 0.9)")
+    p.add_argument("--think", dest="think", action="store_true", default=None,
+                   help="force the model's reasoning pass ON (overrides use_thinking)")
+    p.add_argument("--no-think", dest="think", action="store_false",
+                   help="force the reasoning pass OFF")
+    p.add_argument("--prompt", help="file holding an alternative system prompt to A/B test")
     p.add_argument("--no-guard", action="store_true",
                    help="disable the claim-check correction round (measures the raw model)")
     p.add_argument("--shuffle", action="store_true", help="randomise call order")
