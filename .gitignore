@@ -50,6 +50,10 @@ log_channels.json
 # Single-instance lock
 .bot.lock
 
+# Eval run results (--json output)
+evals/results/
+evals/*.json
+
 # Watchdog / daemon runtime files
 bot.heartbeat
 bot.pid
@@ -58,3 +62,6 @@ logs/
 .bot_version
 
 .claude
+
+# macOS
+.DS_Store

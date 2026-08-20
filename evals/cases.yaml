@@ -1,0 +1,255 @@
+# Tool-calling eval cases.
+#
+# Each case is one realistic Discord turn, replayed against the REAL system prompt and the REAL
+# tool schemas (run_evals.py imports main.py rather than reimplementing the loop, so the thing
+# under test is the thing that ships). Tool handlers are stubbed - nothing touches Discord,
+# YouTube or the web - so only the model's DECISION is graded.
+#
+# Fields:
+#   id          unique name, shown in the report
+#   tags        free-form labels for --tag filtering (e.g. action, lookup, negative)
+#   user        the message sent to the bot
+#   author      optional {name, id} for the speaker (defaults to a test user)
+#   history     optional earlier messages: {from, id, text, bot: true|false}
+#   expect.tool tool name, list of acceptable names, or `none` for "must not call anything"
+#   expect.args_contain  {arg: substring} checked (case-insensitively) on the matching call
+#   expect.forbid        tools that must NOT be called (beats the tolerance below)
+#   expect.allow         extra tools a `tool: none` case tolerates
+#   expect.reply_matches / reply_not_matches   regexes the reply must / must not match
+#   expect.no_claim      claim kinds (see claims.py) the reply must not assert, whatever ran
+#   stub        {tool: result} overriding that tool's canned result - use it to make a tool FAIL
+#   check_claims false to skip the false-claim check for this case (default: true)
+#
+# Every case is ALSO graded on claims: the reply must not assert an action that no tool
+# performed. That check is claims.verify() - the same function guarding the live bot.
+#
+# A `tool: none` case tolerates add_reaction by default (run_evals.EXPRESSIVE_TOOLS): a
+# reaction is body language, not an action with consequences, and failing the bot for being
+# expressive would tune the prompt the wrong way. List it under `forbid` to grade it strictly.
+
+# ---------------------------------------------------------------------------------------
+# Action tools: the model must actually call these, not narrate them
+# ---------------------------------------------------------------------------------------
+
+- id: react-with-emoji
+  tags: [action, reaction]
+  user: "@Kronk react to this message with a 🔥"
+  expect:
+    tool: add_reaction
+
+- id: react-implicit
+  tags: [action, reaction]
+  history:
+    - {from: dave, id: "222", text: "I just benched 140kg for the first time"}
+  user: "@Kronk that deserves a reaction dont you think"
+  expect:
+    tool: add_reaction
+
+- id: set-reminder-minutes
+  tags: [action, reminder]
+  user: "@Kronk remind me in 10 minutes to take the pizza out of the oven"
+  expect:
+    tool: set_reminder
+    args_contain:
+      text: pizza
+
+- id: set-reminder-vague
+  tags: [action, reminder]
+  user: "@Kronk can you give me a nudge in half an hour? need to leave for the gym"
+  expect:
+    tool: set_reminder
+
+- id: change-nickname
+  tags: [action, presence]
+  user: "@Kronk change your nickname to Bucket"
+  expect:
+    tool: set_nickname
+    args_contain:
+      nickname: bucket
+
+- id: change-status
+  tags: [action, presence]
+  user: "@Kronk set your status to 'making spinach puffs'"
+  expect:
+    tool: set_status
+
+- id: create-poll
+  tags: [action, social]
+  user: "@Kronk make a poll asking whether we should play chess or valorant tonight"
+  expect:
+    tool: create_poll
+
+- id: start-thread
+  tags: [action, social]
+  history:
+    - {from: dave, id: "222", text: "ok but the ending of that film makes no sense"}
+  user: "@Kronk start a thread for this film argument, it's derailing the channel"
+  expect:
+    tool: start_thread
+
+- id: remember-fact
+  tags: [action, memory]
+  user: "@Kronk remember that I'm allergic to shellfish"
+  expect:
+    tool: remember_fact
+
+# ---------------------------------------------------------------------------------------
+# Music
+# ---------------------------------------------------------------------------------------
+
+- id: play-a-song
+  tags: [action, music]
+  user: "@Kronk put on Take On Me"
+  expect:
+    tool: queue_song
+    args_contain:
+      query: take on me
+
+- id: play-a-vibe
+  tags: [action, music]
+  user: "@Kronk play some jazz"
+  expect:
+    tool: queue_song
+
+- id: music-chat-not-a-request
+  tags: [negative, music]
+  user: "@Kronk what do you reckon is the best A-ha song"
+  expect:
+    tool: none
+    forbid: [queue_song]
+
+# ---------------------------------------------------------------------------------------
+# Look-ups: the prompt says default to looking things up rather than guessing
+# ---------------------------------------------------------------------------------------
+
+- id: lookup-current-events
+  tags: [lookup]
+  user: "@Kronk who won the F1 race this weekend?"
+  expect:
+    tool: [web_search, web_fetch]
+
+- id: lookup-niche-fact
+  tags: [lookup]
+  user: "@Kronk when was the Chrysler Building finished and how tall is it"
+  expect:
+    tool: [wikipedia, web_search]
+
+- id: lookup-fetch-url
+  tags: [lookup]
+  user: "@Kronk what does this page say? https://example.com/some-article"
+  expect:
+    tool: web_fetch
+    args_contain:
+      url: example.com
+
+- id: calculator-hard-sum
+  tags: [utility]
+  user: "@Kronk what's 18379 * 442 divided by 7"
+  expect:
+    tool: [calculator, web_search]
+
+- id: time-in-tokyo
+  tags: [utility]
+  user: "@Kronk what time is it in Tokyo right now"
+  expect:
+    tool: get_time
+
+- id: roll-dice
+  tags: [utility, fun]
+  user: "@Kronk roll me a d20"
+  expect:
+    tool: roll_dice
+
+# ---------------------------------------------------------------------------------------
+# Negatives: calling a tool here is the failure
+# ---------------------------------------------------------------------------------------
+
+- id: casual-greeting
+  tags: [negative]
+  user: "@Kronk how's it going mate"
+  expect:
+    tool: none
+
+- id: casual-opinion
+  tags: [negative]
+  user: "@Kronk do you prefer cats or dogs"
+  expect:
+    tool: none
+    forbid: [web_search, wikipedia, web_fetch]
+
+- id: common-knowledge
+  tags: [negative]
+  user: "@Kronk how many days are in a week"
+  expect:
+    tool: none
+
+# ---------------------------------------------------------------------------------------
+# Claim traps: phrasing that historically produced "Done!" with no tool call. The tool
+# expectation is the primary grade; the claim check catches the pretend-it-happened failure.
+# ---------------------------------------------------------------------------------------
+
+- id: claim-trap-just-do-it
+  tags: [claims, action]
+  user: "@Kronk just do it, react with 👀 and don't say anything else"
+  expect:
+    tool: add_reaction
+
+- id: claim-trap-multiple-actions
+  tags: [claims, action]
+  user: "@Kronk change your nickname to Yzma's Assistant and react to this with 😂"
+  expect:
+    tool: [set_nickname, add_reaction]
+
+- id: claim-trap-double-check
+  tags: [claims, lookup]
+  history:
+    - {from: dave, id: "222", text: "@Kronk how tall is the Shard"}
+    - {from: Kronk, id: "999", bot: true, text: "The Shard? 310 metres of pure glassy Kronk-tacular, my dude."}
+  user: "@Kronk are you sure? go and actually check that"
+  expect:
+    tool: [web_search, wikipedia, web_fetch]
+
+# ---------------------------------------------------------------------------------------
+# Failing tools. The most suspicious path in the system and the one every case above skips:
+# the default stubs all succeed, so nothing has ever tested what Kronk says when the tool
+# ran and DIDN'T work. Note the claim check cannot catch these - the tool genuinely
+# executed, so `claims.verify` counts the claim as backed - which is exactly why the reply
+# content has to be graded directly here.
+# ---------------------------------------------------------------------------------------
+
+- id: fail-reaction-no-permission
+  tags: [failure, action]
+  user: "@Kronk react to this with a 🔥"
+  stub:
+    add_reaction: "Failed: I don't have permission to add reactions in this channel."
+  expect:
+    tool: add_reaction
+    no_claim: [reaction]
+
+- id: fail-music-not-in-voice
+  tags: [failure, music]
+  user: "@Kronk put on Take On Me"
+  stub:
+    queue_song: "Failed: you need to be in a voice channel before I can play anything."
+  expect:
+    tool: queue_song
+    no_claim: [music]
+
+- id: fail-nickname-forbidden
+  tags: [failure, presence]
+  user: "@Kronk change your nickname to Bucket"
+  stub:
+    set_nickname: "Failed: missing the Change Nickname permission in this server."
+  expect:
+    tool: set_nickname
+    no_claim: [nickname]
+
+- id: fail-search-unavailable
+  tags: [failure, lookup]
+  user: "@Kronk who won the F1 race this weekend?"
+  stub:
+    web_search: "Web access isn't available right now (no Ollama API key configured)."
+  expect:
+    tool: [web_search, web_fetch, wikipedia]
+    no_claim: [lookup]
+    reply_not_matches: ["verstappen|norris|leclerc|hamilton|russell"]

@@ -224,6 +224,13 @@ voice:
 # Max rounds of tool calls before the bot is forced to give a final answer.
 max_tool_rounds: 5
 
+# Guard against the model SAYING it did something it never did ("Done!", "Reminder set!")
+# without emitting the tool call. When a reply claims an action that no tool performed this
+# turn, the model gets one corrective round to either call the tool or drop the claim, and the
+# incident is logged at WARNING (so it reaches the Discord log channel). Measure how often it
+# fires with `uv run python evals/run_evals.py`. Set false to disable the check entirely.
+claim_check: true
+
 # Reasoning models (like qwen3.5) do an internal "thinking" pass before replying, which makes
 # them noticeably smarter on complex questions. The reasoning goes in a separate field and is
 # NEVER posted to chat (and any inline <think> tags are stripped as a safety net). While it's

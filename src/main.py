@@ -15,6 +15,7 @@ import discord
 import ollama
 import yaml
 
+import claims
 import memory
 import tools
 import voice
@@ -133,6 +134,9 @@ SYSTEM_PROMPT = CONFIG.get("system_prompt", "You are a helpful chatbot.")
 
 # Max rounds of tool calls before forcing a final answer (prevents infinite loops)
 MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
+# Catch replies that claim an action ("Reminder set!") when no tool actually ran, and give the
+# model one round to fix it. See claims.py; measured by evals/run_evals.py.
+CLAIM_CHECK = CONFIG.get("claim_check", True)
 # Whether the model does its (slow) internal "thinking" pass. Off by default: much faster,
 # and stops reasoning traces from leaking into replies on reasoning models like qwen3.5.
 MODEL_THINK = CONFIG.get("use_thinking", False)
@@ -350,6 +354,9 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
     conversation = [{"role": "system", "content": system_content}] + list(messages)
     tool_schemas = tools.get_schemas()
 
+    executed_tools: list[str] = []  # what actually ran, for the claim check below
+    corrected = False               # the claim check gets exactly one shot per turn
+
     for round_num in range(MAX_TOOL_ROUNDS):
         start_time = time.time()
         response = await _model_chat(
@@ -363,7 +370,32 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
         tool_calls = response.message.tool_calls
         if not tool_calls:
-            return response.message.content
+            content = response.message.content or ""
+            # The model has decided it's finished. Before that answer goes to the user, check
+            # it doesn't claim an action no tool performed ("Done!", "Reminder set!"). Prompt
+            # instructions alone don't stop this - it's a sampling failure, not a
+            # comprehension one - so it's caught here and sent back once for a fix.
+            if CLAIM_CHECK:
+                unbacked = claims.verify(content, executed_tools)
+                if unbacked and not corrected:
+                    claim = unbacked[0]
+                    log.warning(
+                        f"False action claim ({claim.kind}): said {claim.matched!r} but ran "
+                        f"{executed_tools or 'no tools'} - forcing a correction round"
+                    )
+                    corrected = True
+                    conversation.append(response.message)
+                    conversation.append({"role": "system",
+                                         "content": claims.correction_prompt(claim)})
+                    continue
+                if unbacked:
+                    # Second offence: don't loop again (that's a latency hole), but this is
+                    # the signal that the model/prompt needs work - surface it in the logs.
+                    log.error(
+                        f"Model repeated a false action claim after correction "
+                        f"({unbacked[0].kind}): {unbacked[0].matched!r}"
+                    )
+            return content
 
         # Record the assistant's tool-call turn, then execute each requested tool.
         conversation.append(response.message)
@@ -391,6 +423,7 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
             try:
                 result = await tools.execute(name, args, ctx or ToolContext())
+                executed_tools.append(name)
                 print(f"[DEBUG] Tool {name} returned {len(result)} chars")
             except Exception as e:
                 log.warning(f"Tool {name} failed: {e}")

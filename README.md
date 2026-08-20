@@ -177,6 +177,32 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 (`src/main.py`) and older (`main.py` at the root) layouts, cleans up the stale `bot.pid` and
 `bot.heartbeat`, and exits non-zero if anything survived.
 
+## Testing Tool Calls
+
+The bot's weak spot is tool calling: the model sometimes *says* it reacted, set a reminder or
+looked something up without emitting the tool call. Two things address that.
+
+**At runtime**, every reply is checked against the tools that actually ran this turn
+(`src/claims.py`). A reply claiming an unbacked action gets one corrective round — call the tool
+or drop the claim — and the incident is logged at WARNING. Disable with `claim_check: false`.
+
+**Offline**, the eval harness measures how often it happens:
+
+```bash
+uv run python evals/test_claims.py                  # claim detector unit tests (no model)
+uv run python evals/test_guard.py                   # the correction round itself (no model)
+uv run python evals/run_evals.py                    # every case, 3 samples each
+uv run python evals/run_evals.py --runs 10          # tighter numbers
+uv run python evals/run_evals.py --tag action       # just the action-tool cases
+uv run python evals/run_evals.py --no-guard         # the raw model, guard off
+uv run python evals/run_evals.py --host http://mac-mini.local:11434   # run against the deployed host
+```
+
+Cases live in `evals/cases.yaml` — one realistic Discord turn each, with the tool it should
+call (or `none`). Adding a case is a few lines of YAML, and `stub:` can make a tool *fail* so a
+case can check that Kronk says so instead of reporting success anyway. Because tool calling is sampled rather
+than deterministic, the report is a pass *rate*: treat a single run as noise.
+
 ## Usage
 
 - **@mention** the bot to get a response
@@ -185,6 +211,24 @@ It's stdlib-only, so it still works if the venv is broken. It matches both the c
 - **`!help`** to list every command
 
 ## Changelog
+
+### v0.2.4
+
+- **Kronk can no longer fake it**: replies that claim an action ("Done!", "Reminder set!",
+  "*changes nickname*") when no tool actually ran are now caught before they're sent. The model
+  gets one corrective round to either call the tool or drop the claim, and every incident is
+  logged at WARNING so it reaches the Discord log channel. Prompt instructions alone never fixed
+  this — it's a sampling failure, not a comprehension one. Toggle with `claim_check` in config.
+- **Tool-calling eval harness** (`evals/`): `uv run python evals/run_evals.py` replays 28
+  realistic Discord turns against the real system prompt and real tool schemas (handlers are
+  stubbed, so nothing touches Discord or the web) and reports a per-case pass rate — did Kronk
+  actually call the right tool, and did he claim anything he didn't do. Tool calling is sampled,
+  so `--runs 10` gives a number you can tune the prompt against; `--no-guard` measures the raw
+  model without the claim check, and the exit code gates on `--threshold`.
+- **Fast tests, no model needed** (`evals/test_claims.py`, `evals/test_guard.py`): 68 checks on
+  the claim detector plus 6 on the correction round, all running in milliseconds against a
+  scripted model. Half the detector checks are honest replies that must NOT be flagged — a false
+  positive rewrites a perfectly good answer, so precision is pinned down harder than recall.
 
 ### v0.2.3
 

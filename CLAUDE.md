@@ -27,6 +27,8 @@ All Python code lives in `src/`; configs, scripts and runtime state live in the 
 - `src/voice.py` - YouTube audio playback in voice channels (`!play` and friends)
 - `src/memory.py` - Lightweight memory system (user summaries + conversation recall), SQLite + sqlite-vec backed
 - `src/discord_logging.py` - Optional per-server Discord log channel (`/setlogchannel`)
+- `src/claims.py` - Detects replies that claim an action no tool performed (see below)
+- `evals/` - Tool-calling eval harness (`run_evals.py`, `cases.yaml`) + claim-detector unit tests
 - `kronk_config.yaml` - Default config (Kronk persona), always loaded as base
 - `config.yaml` - User overrides (gitignored, optional). Only needs fields you want to change.
 - `pyproject.toml` - Dependencies (uses uv)
@@ -121,6 +123,77 @@ of variants (one picked at random for variety) with `{placeholder}` fields from 
 Neutral defaults live in `tools.py` (`DEFAULT_ANNOUNCEMENTS`); per-persona overrides go in the
 `tool_announcements:` config block (kronk_config.yaml ships Kronk-voiced ones). Loaded via
 `tools.configure_announcements()`.
+
+## Tool-Call Validation (`claims.py` + `evals/`)
+
+The model's most damaging failure mode is claiming an action it never performed: "Done!",
+"Reminder set!", "*changes nickname to Bucket*" - with no tool call behind it, so nothing
+happened and the user is told it did. **This is a sampling failure, not a comprehension one**:
+the system prompt already forbids it in three separate places (`kronk_config.yaml`, "Using your
+tools"), and it still happens. Prompt wording alone cannot fix it, so it is caught after the
+fact and measured.
+
+**Runtime guard** (`claims.py`, wired into `query_ollama`): the loop records which tools
+actually executed. Before a final answer is returned, `claims.verify(reply, executed_tools)`
+looks for statements only a tool could make true and checks each against what ran. An unbacked
+claim triggers ONE corrective round (`claims.correction_prompt`) offering the model both outs -
+call the tool now, or reply again without the claim - because forcing the tool would be wrong
+when the user never asked for the action. A second offence is logged at ERROR and let through;
+looping again would be a latency hole. Every incident is logged at WARNING, so `claim_check` in
+config doubles as production telemetry for how often the model lies. Note a tool that *ran*
+counts as backing the claim even if it returned a failure message - the check compares calls,
+not outcomes.
+
+**Precision over recall, deliberately.** A missed lie costs one bad reply; a false positive
+rewrites a perfectly good answer and burns a model round. So a sentence that hedges, negates,
+asks or offers is vetoed before matching (`_HEDGE_RE`: "want me to set a reminder?"), as is one
+whose subject is someone else (`_has_other_subject`: "Dave started a thread last week" - the bot
+narrates what users did constantly). Bare "Done!" only counts when it opens a SHORT reply.
+
+**Adding a rule**: add the pattern to `_RULES` in claims.py with the tools that would make it
+true, then add the sentence that motivated it to `CAUGHT` in `evals/test_claims.py` AND the
+nearest innocent phrasing to `ALLOWED`. The allowed list is the one that matters.
+
+**Eval harness** (`evals/run_evals.py`): replays the cases in `evals/cases.yaml` - one realistic
+Discord turn each - and scores whether the right tool fired. It **imports `main` and calls the
+real `query_ollama()`** rather than reimplementing the loop, so what's graded is what ships;
+only `tools.execute` is swapped for a recorder returning canned results, so nothing reaches
+Discord, YouTube or the web. It also force-enables every configured tool (`has_api_key=True`
+etc.) so a missing key on the dev machine can't silently shrink the tool set and turn real
+failures into vacuous passes. Every case is additionally graded with `claims.verify()` - the
+same function guarding the live bot, so guard and measurement can't drift.
+
+Tool calling is **sampled, not deterministic**: a case that passes once fails the next time, so
+the report is a pass RATE over `--runs` samples. A single run is noise; 10 runs is a number you
+can tune against. `--no-guard` measures the raw model with the claim check off, which is how you
+tell whether a prompt change or the guard did the work. Exit code gates on `--threshold`.
+
+A `tool: none` case tolerates `add_reaction` (`EXPRESSIVE_TOOLS`): a reaction is body language,
+not a consequential action, and failing the bot for being expressive would tune the prompt in
+exactly the wrong direction.
+
+Baselines as of 2026-08-20, `qwen3.5:9b` locally (24 cases x 3 runs): **94%** with the guard
+on, **99%** with `--no-guard`. That gap is sampling noise on tool-CHOICE cases, not the guard:
+**the claim check fired 0 times in 144 samples** - this model family didn't fabricate an action
+once. So the guard currently costs nothing (no extra rounds, and zero false positives across 144
+real replies, which is the precision evidence the unit tests can't give) but has no measured
+recall benefit yet. It remains insurance for the deployed 35b, which is where the reported
+"says Done but did nothing" behaviour actually comes from and has still not been measured.
+
+**Failing tools were the most suspicious untested path** - every stub succeeds by default, and
+"Reacted! 🔥" after a permissions error is the same lie as never calling the tool. The `failure`
+tag covers it (`stub:` makes a tool return an error); note `claims.verify` CANNOT catch these,
+because the tool really did run, so those cases grade `expect.no_claim` instead - asserting the
+reply contains no success claim of that kind via `claims.find_claims`. Reuse that rather than
+writing reply regexes: the first attempt hand-rolled them and failed honest replies for saying
+"I'll get it queued up once you join" (an offer, not a claim) - exactly the tense/hedge problem
+claims.py already solves. qwen3.5:9b scored 12/12 on these.
+
+The real failure this surfaced is the opposite of fabrication: **over-eager searching**.
+`music-chat-not-a-request` ("what do you reckon is the best A-ha song") scored 1/3 - the model
+web_searches an opinion question, sometimes 3-4 times in a row, exhausts `max_tool_rounds` and
+returns an EMPTY reply, so the user gets main.py's "I'm not sure what to say to that. 🥒"
+failsafe. Note `llama3.1:8b` failed the same case, so it isn't model-specific.
 
 ## Memory System
 
@@ -270,6 +343,10 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Configurable tools system: `tools:` config section with per-tool on/off (see `tools.py`).
 [x] Expanded tool set: web, fun/social, knowledge, embodiment, and memory tools (moderation intentionally skipped for now).
 [x] Tool-call announcements: bot posts "Looking up …" before lookups (`announce_tools`).
+[x] Tool-call validation: `claims.py` catches replies claiming an action no tool performed and forces one corrective round; `evals/` measures how often it happens (see the section above). Claim detector has 68 unit tests; the eval harness has 24 cases.
+[ ] Run the evals against the DEPLOYED model: local baselines are `qwen3.5:9b` (94% guard on / 99% guard off) and `llama3.1:8b` (83%), neither of which is what ships. The laptop CANNOT run `qwen3.5:35b-a3b` - 23GB of weights against 18GB of RAM drove swap to 19GB. Run `uv run python evals/run_evals.py --runs 10` on the mini, with and without `--no-guard`.
+[ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
+[ ] Leaked tool calls: `llama3.1:8b` sometimes emits `{"name": "add_reaction", "parameters": {...}}` as message TEXT instead of a native tool call, so the user sees raw JSON and the action never happens. Caught by the evals but not guarded against - if qwen3.5 ever does this, detect a JSON tool-call blob in the reply and either execute it or suppress it.
 [ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
 [x] Persist reminders: stored in `reminders_file` (default `./bot_reminders.json`); rescheduled on startup via `tools.reschedule_reminders()` in on_ready, overdue ones fire immediately.
 [x] Memory storage: migrated JSON -> SQLite + sqlite-vec (binary float32 vectors, zlib-compressed text). More efficient + not plaintext on disk. Verified with a fake embedding; run once against real `nomic-embed-text` on the deployed bot.
@@ -307,4 +384,9 @@ export OLLAMA_API_KEY="your-ollama-key"  # optional, for web search
 
 # Run (from the project root - the code is in src/)
 uv run python src/main.py
+
+# Tests (no Discord token or running bot needed)
+uv run python evals/test_claims.py    # false-claim detector, ~ms
+uv run python evals/test_guard.py     # the correction round in query_ollama, ~ms
+uv run python evals/run_evals.py      # tool-calling evals - needs Ollama + the model
 ```
