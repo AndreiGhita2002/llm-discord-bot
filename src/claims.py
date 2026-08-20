@@ -228,7 +228,8 @@ def _has_other_subject(prefix: str) -> bool:
 _ROLEPLAY_SEGMENT_RE = re.compile(r"\*([^*\n]{3,120})\*")
 _ROLEPLAY_KEYWORDS: list[tuple[re.Pattern, str, tuple[str, ...]]] = [
     (re.compile(r"\breact|\bemoji\b", re.IGNORECASE), "reaction", ("add_reaction",)),
-    (re.compile(r"\bnick\s?name|\brenames?\b", re.IGNORECASE), "nickname", ("set_nickname",)),
+    (re.compile(r"\bnick\s?name|\brenames?\b|\bchanges?\s+(?:my\s+)?name\b", re.IGNORECASE),
+     "nickname", ("set_nickname",)),
     (re.compile(r"\bstatus\b", re.IGNORECASE), "status", ("set_status",)),
     (re.compile(r"\bpoll\b", re.IGNORECASE), "poll", ("create_poll",)),
     (re.compile(r"\bthread\b", re.IGNORECASE), "thread", ("start_thread",)),
@@ -257,17 +258,33 @@ def _roleplay_claims(reply: str) -> list[Claim]:
 
 
 def _generic_claim(reply: str) -> Claim | None:
-    """A short reply that opens with a bare completion report ("Done!", "All set")."""
+    """A bare completion report ("Done!", "All set") standing on its own.
+
+    Two forms count. A SHORT reply that opens with one - the classic "Done!" and nothing else.
+    And any sentence that is ONLY the completion word, wherever it sits: production produced
+    "*changes name* Done! Your new boss is now @Kronk", where the claim is mid-reply and the
+    reply-initial rule never saw it. Both stay narrow: a leading "Done deal, and honestly..."
+    in a long answer is a figure of speech, not a report.
+    """
     stripped = (reply or "").strip().lstrip("*_ ")
-    if len(stripped) > _GENERIC_MAX_CHARS:
+    if not stripped:
         return None
-    match = _GENERIC_RE.match(stripped)
-    if not match:
-        return None
-    first = _sentences(stripped)[0] if _sentences(stripped) else stripped
-    if _HEDGE_RE.search(first):
-        return None
-    return Claim("completion", match.group(0), first, (ANY_TOOL,))
+    sentences = _sentences(stripped)
+
+    if len(stripped) <= _GENERIC_MAX_CHARS:
+        match = _GENERIC_RE.match(stripped)
+        if match:
+            first = sentences[0] if sentences else stripped
+            if not _HEDGE_RE.search(first):
+                return Claim("completion", match.group(0), first, (ANY_TOOL,))
+
+    for sentence in sentences:
+        bare = sentence.strip().strip("*_ ")
+        match = _GENERIC_RE.match(bare)
+        # The whole sentence must BE the claim - "Done!" not "Done deal, and honestly ...".
+        if match and len(bare) - len(match.group(0)) <= 2 and not _HEDGE_RE.search(bare):
+            return Claim("completion", match.group(0), sentence, (ANY_TOOL,))
+    return None
 
 
 def find_claims(reply: str) -> list[Claim]:
