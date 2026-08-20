@@ -224,6 +224,14 @@ voice:
 # Max rounds of tool calls before the bot is forced to give a final answer.
 max_tool_rounds: 5
 
+# Context window in tokens. MUST be set: Ollama's own default is 4096, and the system prompt
+# (~1800 tokens) plus the tool schemas (~1400 for 18 tools) fill 78% of that before a single
+# message of conversation. On overflow Ollama truncates from the front - dropping the system
+# prompt's "you MUST call the tool" rules - and the model starts acting tools out in prose
+# ("*changes nickname*") or emitting reasoning with no room left for a reply. Raise it if you
+# add tools, lengthen the persona, or store more memory; lower it only to save VRAM.
+num_ctx: 16384
+
 # Guard against the model SAYING it did something it never did ("Done!", "Reminder set!")
 # without emitting the tool call. When a reply claims an action that no tool performed this
 # turn, the model gets one corrective round to either call the tool or drop the claim, and the

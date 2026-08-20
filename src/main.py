@@ -146,6 +146,13 @@ THINKING_MESSAGE = CONFIG.get("thinking_message", "🤔 Kronking…") #TODO(conf
 # forever if Ollama stalls (e.g. the model got evicted while the host slept). On timeout the
 # request is cancelled and the user gets the timeout message instead of dead silence.
 REQUEST_TIMEOUT = CONFIG.get("request_timeout", 180)
+# Context window. Ollama's default is 4096 tokens, and the system prompt (~1800) plus the tool
+# schemas (~1400 for 18 tools) already fill 78% of that before any conversation. Everything
+# else - history, memory context, the reasoning pass, the answer itself - has to fit in what's
+# left, and when it doesn't Ollama truncates from the FRONT: the system prompt goes first,
+# taking the "you MUST call the tool, never act it out in prose" rules with it. The model then
+# performs the tool instead of calling it, or emits reasoning with no room left for a reply.
+NUM_CTX = CONFIG.get("num_ctx", 16384)
 # --- Self-recovery watchdog ---------------------------------------------------------------
 # A background OS thread checks that the asyncio event loop is still advancing. An async task
 # bumps a heartbeat every few seconds; if it stops advancing for WATCHDOG_TIMEOUT seconds the
@@ -322,12 +329,15 @@ async def _model_chat(client: ollama.AsyncClient, **kwargs):
     asyncio.wait_for guarantees a hung Ollama call is cancelled instead of blocking forever;
     the resulting TimeoutError is handled upstream (user sees the timeout message).
     """
+    # num_ctx must be set explicitly: Ollama defaults to 4096, which this prompt overflows.
+    options = {"num_ctx": NUM_CTX, **kwargs.pop("options", {})}
+
     async def _call():
         try:
-            return await client.chat(think=MODEL_THINK, **kwargs)
+            return await client.chat(think=MODEL_THINK, options=options, **kwargs)
         except (TypeError, ollama.ResponseError) as e:
             print(f"[WARN] 'think' param not accepted ({e}); retrying without it")
-            return await client.chat(**kwargs)
+            return await client.chat(options=options, **kwargs)
 
     return await asyncio.wait_for(_call(), timeout=REQUEST_TIMEOUT)
 

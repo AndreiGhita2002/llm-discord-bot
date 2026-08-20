@@ -212,6 +212,24 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ## Changelog
 
+### v0.2.5
+
+- **Fixed the real cause of flaky tool calling**: every request ran in Ollama's default
+  **4096-token** context, but the system prompt (~1800 tokens) plus 18 tool schemas (~1400)
+  already fill 78% of it. History, memory and the reasoning pass overflowed the rest, and Ollama
+  truncates from the *front* — dropping the system prompt's "you MUST call the tool, never act it
+  out in prose" rules. That is why Kronk would answer `*changes nickname*` or an empty reply, yet
+  work perfectly when you named the tool explicitly (that text is in the newest message, which
+  survives truncation). `num_ctx` is now set explicitly (default 16384) and is configurable.
+- **Detector catches performed-not-called actions**: `*changes name* Done!`,
+  `*changes status* Donezo!` and third-person renames (`@Kronk's new name is "…"`) are now
+  flagged. All are real replies from the deployed bot.
+- **Eval harness can A/B the things that matter**: `--model`, `--think/--no-think`, `--num-ctx`
+  and `--prompt FILE`, so a model, reasoning mode, context size or prompt variant can be scored
+  against the same cases. Empty replies now report *why* — nothing generated vs. reasoning-only.
+- **Failing-tool cases**: `stub:` makes a tool return an error, so the suite checks that Kronk
+  says it failed instead of reporting success anyway.
+
 ### v0.2.4
 
 - **Kronk can no longer fake it**: replies that claim an action ("Done!", "Reminder set!",

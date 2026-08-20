@@ -213,6 +213,7 @@ def grade(case: Case, tools_called: list[str], call_args: list[tuple[str, dict]]
 async def run_sample(case: Case, main, tools, claims_mod) -> RunResult:
     """One model call for one case, with tool handlers stubbed out."""
     call_args: list[tuple[str, dict]] = []
+    empty_note: list[str] = []
     real_execute = tools.execute
 
     async def fake_execute(name: str, args: dict, ctx) -> str:
@@ -226,9 +227,18 @@ async def run_sample(case: Case, main, tools, claims_mod) -> RunResult:
     started = time.time()
     try:
         # ctx=None: no Discord context, which also suppresses tool announcements.
-        reply = await main.query_ollama(messages, ctx=None)
-        reply = main.strip_thinking(reply or "")
-        reply = main.strip_message_prefix(reply)
+        raw = await main.query_ollama(messages, ctx=None) or ""
+        reply = main.strip_message_prefix(main.strip_thinking(raw))
+        # An empty reply has two very different causes and they must not look alike: the model
+        # genuinely said nothing, or it emitted ONLY reasoning which strip_thinking then
+        # removed. The second means the reasoning pass is on when it shouldn't be - usually
+        # because Ollama rejected the `think` parameter and main._model_chat silently retried
+        # without it, leaving the model's default (on) in force.
+        if not reply.strip():
+            note = ("model returned nothing at all" if not raw.strip()
+                    else f"model returned ONLY reasoning ({len(raw)} chars stripped as "
+                         f"<think>) - the reasoning pass is on")
+            empty_note.append(note)
     except Exception as exc:  # a model/transport failure is a failed sample, not a crash
         return RunResult(case.id, False, [f"error: {exc}"], [], "", time.time() - started,
                          error=str(exc))
@@ -237,7 +247,9 @@ async def run_sample(case: Case, main, tools, claims_mod) -> RunResult:
 
     tools_called = [n for n, _ in call_args]
     passed, reasons = grade(case, tools_called, call_args, reply, claims_mod)
-    return RunResult(case.id, passed, reasons, tools_called, reply, time.time() - started)
+    reasons.extend(empty_note)
+    return RunResult(case.id, passed and not empty_note, reasons, tools_called, reply,
+                     time.time() - started)
 
 
 def print_report(results: dict[str, list[RunResult]], cases: dict[str, Case],
@@ -294,6 +306,8 @@ async def main_async(args) -> int:
         main.MODEL = args.model
     if args.think is not None:
         main.MODEL_THINK = args.think
+    if args.num_ctx:
+        main.NUM_CTX = args.num_ctx
     if args.prompt:
         # A/B a prompt variant without editing the config the bot actually runs on.
         main.CONFIG["system_prompt"] = Path(args.prompt).read_text()
@@ -339,6 +353,7 @@ async def main_async(args) -> int:
     print(f"model:  {main.MODEL}  (host {os.environ.get('OLLAMA_HOST', 'http://localhost:11434')})")
     print(f"tools:  {len(enabled)} enabled")
     print(f"guard:  claim check {'OFF' if args.no_guard else 'ON'}")
+    print(f"ctx:    {main.NUM_CTX} tokens")
     print(f"think:  {main.MODEL_THINK}"
           + (f"   prompt: {args.prompt}" if args.prompt else ""))
     print(f"cases:  {len(cases)} x {args.runs} run(s) = {len(cases) * args.runs} model calls")
@@ -417,6 +432,7 @@ def parse_args(argv=None):
     p.add_argument("--no-think", dest="think", action="store_false",
                    help="force the reasoning pass OFF")
     p.add_argument("--prompt", help="file holding an alternative system prompt to A/B test")
+    p.add_argument("--num-ctx", type=int, help="context window override (config default: 16384)")
     p.add_argument("--no-guard", action="store_true",
                    help="disable the claim-check correction round (measures the raw model)")
     p.add_argument("--shuffle", action="store_true", help="randomise call order")

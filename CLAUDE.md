@@ -124,6 +124,26 @@ Neutral defaults live in `tools.py` (`DEFAULT_ANNOUNCEMENTS`); per-persona overr
 `tool_announcements:` config block (kronk_config.yaml ships Kronk-voiced ones). Loaded via
 `tools.configure_announcements()`.
 
+## Context Window (`num_ctx`) - READ THIS IF TOOL CALLING GETS FLAKY
+
+Ollama's default context is **4096 tokens**, and this bot's system prompt (~1800) plus its tool
+schemas (~1400 for 18 tools) consume 78% of that *before any conversation*. History, memory
+context, the reasoning pass and the answer all have to fit in what remains. On overflow Ollama
+truncates **from the front**, so the system prompt is what gets dropped - including the "you
+MUST call the matching tool, NEVER act it out in prose" rules - while the newest user message
+always survives.
+
+The symptoms are not obviously context-shaped, which is why this note exists: the model performs
+actions instead of calling them ("*changes nickname*"), returns an empty reply (reasoning ate
+the remaining budget), or answers `<ignore>` to a direct request - but works fine when the user
+names the tool explicitly, because that text is in the newest message. Measured on the deployed
+35b-a3b at 89% on action cases, with 9 of 15 failures being performances rather than calls.
+
+`main.NUM_CTX` (config `num_ctx`, default 16384) is therefore passed explicitly on every
+`_model_chat` call. **Raise it when adding tools or lengthening the persona** - both push the
+fixed baseline up. Check what the runtime actually used with `curl -s $OLLAMA/api/ps`, which
+reports `context_length` per loaded model; `evals/run_evals.py --num-ctx N` A/Bs it.
+
 ## Tool-Call Validation (`claims.py` + `evals/`)
 
 The model's most damaging failure mode is claiming an action it never performed: "Done!",
@@ -345,12 +365,13 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Tool-call announcements: bot posts "Looking up …" before lookups (`announce_tools`).
 [x] Tool-call validation: `claims.py` catches replies claiming an action no tool performed and forces one corrective round; `evals/` measures how often it happens (see the section above). Claim detector has 68 unit tests; the eval harness has 24 cases.
 [ ] Run the evals against the DEPLOYED model: local baselines are `qwen3.5:9b` (94% guard on / 99% guard off) and `llama3.1:8b` (83%), neither of which is what ships. The laptop CANNOT run `qwen3.5:35b-a3b` - 23GB of weights against 18GB of RAM drove swap to 19GB. Run `uv run python evals/run_evals.py --runs 10` on the mini, with and without `--no-guard`.
+[ ] Re-measure everything after the num_ctx fix: every number recorded above (35b-a3b 89%, qwen3.5:9b 81% on the mini, 94% locally) was taken with a 4096-token window, i.e. with the system prompt being truncated. They are all suspect. Re-run `--runs 10 --tag action` on the mini before drawing any conclusion about which MODEL is better - the 9b's many empty replies on the mini are the signature of overflow, not of the model.
 [ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
 [ ] Leaked tool calls: `llama3.1:8b` sometimes emits `{"name": "add_reaction", "parameters": {...}}` as message TEXT instead of a native tool call, so the user sees raw JSON and the action never happens. Caught by the evals but not guarded against - if qwen3.5 ever does this, detect a JSON tool-call blob in the reply and either execute it or suppress it.
 [ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
 [x] Persist reminders: stored in `reminders_file` (default `./bot_reminders.json`); rescheduled on startup via `tools.reschedule_reminders()` in on_ready, overdue ones fire immediately.
 [x] Memory storage: migrated JSON -> SQLite + sqlite-vec (binary float32 vectors, zlib-compressed text). More efficient + not plaintext on disk. Verified with a fake embedding; run once against real `nomic-embed-text` on the deployed bot.
-[x] Latency + hallucination fixes: `use_thinking: false` disables the reasoning pass (faster, no reasoning leak); system prompt makes Kronk tool-shy (answer from own knowledge, offer to look up rather than auto-searching, never fabricate); per-channel asyncio lock serializes concurrent messages; tool-announcement messages are excluded from fetched history so the model doesn't "continue" a half-started answer.
+[x] Latency + hallucination fixes: `use_thinking` toggles the reasoning pass (NOTE: kronk_config.yaml currently ships it as `true`, not false - it was flipped back after this entry was written); system prompt makes Kronk tool-shy (answer from own knowledge, offer to look up rather than auto-searching, never fabricate); per-channel asyncio lock serializes concurrent messages; tool-announcement messages are excluded from fetched history so the model doesn't "continue" a half-started answer.
 [ ] If double-replies persist after these fixes, suspect TWO bot processes on the host (check `ps aux | grep '[m]ain.py'`) - the per-channel lock only serializes within one process. A single-instance guard was tried once (commit 0393d45) and reverted (91def21).
 [x] Self-recovery from hangs: in-process watchdog thread in main.py force-exits (`os._exit(1)`) if the event loop stops advancing (heartbeat stalls > `watchdog_timeout`, default 120s); an async task rewrites `bot.heartbeat` every 5s. The daemon runner (`run-bot.sh`, generated by setup-daemon-mac.sh) now restarts a *hung* bot (stale heartbeat), not just a dead one, on a fast (~15s) health tick, and wraps all git ops in timeouts + uses `git reset --hard origin/main` so a dirty tree / bad network can't wedge the guard or block a deploy. NOTE: the runner change only takes effect after re-running `./setup-daemon-mac.sh` on the host (run-bot.sh is generated, not pulled). The main.py watchdog deploys via the normal git auto-pull.
 [x] Blocking web calls fixed: `ollama.web_search`/`web_fetch` are synchronous - they were called directly on the event loop and would freeze the whole bot on a cloud stall. Now offloaded via `asyncio.to_thread` + `asyncio.wait_for(WEB_TIMEOUT)`. They also short-circuit with a friendly message when `OLLAMA_API_KEY` is unset (tool can stay enabled in config). Root cause of the "Ollama error crashes the service" only bites once a key is added; the watchdog covers all other hang sources.

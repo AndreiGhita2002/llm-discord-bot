@@ -1,6 +1,6 @@
 [project]
 name = "llm-discord-bot"
-version = "0.2.4"
+version = "0.2.5"
 description = "LLM based discord bot. Optimised for entartained and mimicking human responses."
 requires-python = ">=3.12"
 
