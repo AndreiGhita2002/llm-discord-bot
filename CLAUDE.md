@@ -28,6 +28,7 @@ All Python code lives in `src/`; configs, scripts and runtime state live in the 
 - `src/memory.py` - Lightweight memory system (user summaries + conversation recall), SQLite + sqlite-vec backed
 - `src/discord_logging.py` - Optional per-server Discord log channel (`/setlogchannel`)
 - `src/claims.py` - Detects replies that claim an action no tool performed (see below)
+- `src/expression.py` - Spontaneous reactions/memories/status/nickname/About Me (see below)
 - `evals/` - Tool-calling eval harness (`run_evals.py`, `cases.yaml`) + claim-detector unit tests
 - `kronk_config.yaml` - Default config (Kronk persona), always loaded as base
 - `config.yaml` - User overrides (gitignored, optional). Only needs fields you want to change.
@@ -143,6 +144,43 @@ names the tool explicitly, because that text is in the newest message. Measured 
 `_model_chat` call. **Raise it when adding tools or lengthening the persona** - both push the
 fixed baseline up. Check what the runtime actually used with `curl -s $OLLAMA/api/ps`, which
 reports `context_length` per loaded model; `evals/run_evals.py --num-ctx N` A/Bs it.
+
+## Spontaneous Expression (`expression.py`)
+
+Reacting, quietly remembering a fact, changing status / nickname / About Me on the bot's own
+initiative rather than on request. **Do not try to do this from the main system prompt** - it
+was tried and measured: with the tools enabled and the prompt explicitly asking for it,
+spontaneous reactions fired 10%, 10% and 20% on the messages that most deserved one, on both
+qwen3.5:9b and the deployed 35b-a3b.
+
+The cause is structural, not wording. While the model is composing a reply, a text answer
+already fully satisfies the turn, so an optional tool call competes with something already
+good enough - and optional loses. The same tool-description lever that took `add_reaction`
+from 60% to 90% when the USER asks moved spontaneity not at all, because there the call is the
+only way to satisfy the request.
+
+So it runs as a **separate decision after the reply is sent** (`asyncio.create_task` at the end
+of `_generate_reply`), where the only question is "does this moment call for it". Two things
+follow: the user pays no latency (the reply is already on screen, and a reaction landing a
+moment later is how a person does it), and **frequency is enforced in code** - each action's
+`chance` and `cooldown` are applied AFTER the model decides, so "occasionally" is a config
+value rather than a plea the model can ignore.
+
+Actions run through `tools.execute`, so permissions and error handling are identical to a
+normal tool call. `already_done` (from `ToolContext.executed_tools`) suppresses any action the
+reply itself already took, so a message never gets reacted to twice.
+
+**The decision prompt must not ask for restraint.** It opened with "most of the time the answer
+is NONE of them", which suppressed the exact behaviour the pass exists to produce - 2/5 on a
+message that plainly deserved a reaction. Rarity is the knobs' job; the prompt's job is an
+honest judgement of this moment, and it must also say the actions are independent or the model
+picks only one. After that change: reaction 5/5 on good news, a joke and bad news, 1/5 on small
+talk, 0/5 on logistics.
+
+Measured with `evals/expression_scenarios.py` (live, needs a model) for the DECISION, and
+`evals/test_expression.py` (no model) for the enforcement - cooldowns, chance, duplicate
+suppression, malformed JSON. Adding an action means one `Action(...)` entry in `_DEFAULTS`
+plus its config block; the tool it names must already exist in the registry.
 
 ## Tool-Call Validation (`claims.py` + `evals/`)
 
@@ -377,6 +415,8 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Tool-call validation: `claims.py` catches replies claiming an action no tool performed and forces one corrective round; `evals/` measures how often it happens (see the section above). Claim detector has 68 unit tests; the eval harness has 24 cases.
 [ ] Run the evals against the DEPLOYED model: local baselines are `qwen3.5:9b` (94% guard on / 99% guard off) and `llama3.1:8b` (83%), neither of which is what ships. The laptop CANNOT run `qwen3.5:35b-a3b` - 23GB of weights against 18GB of RAM drove swap to 19GB. Run `uv run python evals/run_evals.py --runs 10` on the mini, with and without `--no-guard`.
 [x] Re-measured on the deployed model after num_ctx + tool descriptions + dedup: 89% -> 97% on action cases, 99% on negative/lookup (see the table above). NOTE the earlier model comparison (qwen3.5:9b scoring 81% on the mini) was run with the 4096 window and is void - its empty replies were overflow, not the model. If you want that comparison, redo it now.
+[x] Spontaneous expression: reactions, remember_fact, status, nickname and About Me now happen unprompted via `expression.py`. Prompt-based attempts failed at 10-20%; the separate post-reply pass measures 5/5 on messages that deserve a reaction and 0-1/5 on ones that don't.
+[ ] Live-verify the expression pass on the deployed bot: unit-tested and scenario-measured against qwen3.5:9b, but it has never run against real Discord. `set_about` in particular has never been called for real - it edits the bot's own application description via PATCH /applications/@me, which discord.py exposes as `AppInfo.edit(description=...)`. Watch for whether it needs any scope beyond the bot's own token.
 [ ] `add_reaction` is the last weak tool at 9/10: the model announces the reaction in text ("I shall kronkify this moment right away! 🔥") or just types the emoji instead of calling it. Reactions are uniquely fakeable - no one can type a poll or a rename. Options if it becomes annoying: a claim rule for INTENT ("let me react", "I shall...") so the guard forces a correction round, or accept it as the least harmful miss.
 [ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
 [ ] Leaked tool calls: `llama3.1:8b` sometimes emits `{"name": "add_reaction", "parameters": {...}}` as message TEXT instead of a native tool call, so the user sees raw JSON and the action never happens. Caught by the evals but not guarded against - if qwen3.5 ever does this, detect a JSON tool-call blob in the reply and either execute it or suppress it.

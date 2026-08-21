@@ -114,6 +114,53 @@ system_prompt: |
     Here are some examples of messages users can say which don't need a response: "Goodbye", "Hmm I see...", or just "@Kronk" followed by nothing.
     Your response to that or anything similar, would be simply just '<ignore>'.
 
+# Spontaneous expression
+# Things the bot does on its own initiative, without being asked: reacting to a message,
+# quietly remembering a fact about someone, changing its status, nickname or About Me.
+#
+# This exists because asking the MAIN model to do it during a reply does not work. With the
+# tools enabled and the system prompt explicitly encouraging it, spontaneous reactions fired
+# 10-20% of the time on the messages that most deserved one, on two different models. While
+# the model is writing a reply, a text answer already satisfies the turn, so an optional tool
+# call competes with something already good enough - and loses.
+#
+# So it runs as a separate decision AFTER the reply is sent (costing the user no latency,
+# since the reply is already on screen), where the only question is "should I do this?".
+# Frequency is enforced here rather than requested in a prompt: `chance` is applied after the
+# model decides, and `cooldown` (seconds) stops an action repeating too soon.
+expression:
+  enabled: true
+  # Probability of running the decision at all after any given reply. Lower it to cut load.
+  chance: 1.0
+  actions:
+    # Weightless and disappears into the scroll - no cooldown needed.
+    reaction:
+      enabled: true
+      chance: 1.0
+      cooldown: 0
+    # Durable facts about people. Worth catching every time someone mentions one in passing.
+    remember:
+      enabled: true
+      chance: 1.0
+      cooldown: 0
+    # Visible but transient, and global to the bot rather than per-server.
+    status:
+      enabled: true
+      chance: 0.5
+      cooldown: 1800    # 30 min
+    # Per-server, and people notice a rename - keep it a treat rather than a tic.
+    nickname:
+      enabled: true
+      chance: 0.3
+      cooldown: 7200    # 2 hours
+    # Global AND permanent until changed again: the rarest of the lot by design.
+    about:
+      enabled: true
+      chance: 0.2
+      cooldown: 86400   # 1 day
+  # Model for the decision call; defaults to the main model when unset.
+  model: null
+
 # Message history settings
 # Represent the bot's short term memories
 # i.e. what is being currently talked about in the conversation
@@ -340,6 +387,7 @@ tools:
   add_reaction: true
   set_status: true
   set_nickname: true
+  set_about: true
   get_user_info: true
   # Memory (require memory.do_memory: true)
   remember_fact: true

@@ -16,6 +16,7 @@ import ollama
 import yaml
 
 import claims
+import expression
 import memory
 import tools
 import voice
@@ -451,6 +452,8 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
             try:
                 result = await tools.execute(name, args, ctx or ToolContext())
                 executed_tools.append(name)
+                if ctx is not None:
+                    ctx.executed_tools.append(name)
                 print(f"[DEBUG] Tool {name} returned {len(result)} chars")
             except Exception as e:
                 log.warning(f"Tool {name} failed: {e}")
@@ -690,6 +693,18 @@ async def _generate_reply(message: discord.Message, ref_msg, ctx: ToolContext):
     overall_elapsed = time.time() - overall_start
     print(f"[TIMING] Overall response: {overall_elapsed:.2f}s")
 
+    # Spontaneous expression: react, remember, change status/nickname/About Me on his own
+    # initiative. Detached deliberately - the reply is already on screen, so this costs the
+    # user no latency, and a reaction landing a moment later is how a person does it anyway.
+    # It gets the tools that already ran so it never repeats what the reply just did.
+    asyncio.create_task(expression.express(
+        message,
+        user_text=message.content,
+        reply_text=response,
+        ctx=ctx,
+        already_done=set(ctx.executed_tools),
+    ))
+
     # Process memory after responding (non-blocking for user experience)
     if do_memory:
         # Store this conversation for future recall. Offloaded to a thread (it runs a blocking
@@ -889,6 +904,11 @@ if __name__ == "__main__":
     )
     # Load any persona-specific announcement templates (fall back to built-in defaults).
     tools.configure_announcements(CONFIG.get("tool_announcements"))
+
+    # Spontaneous expression runs AFTER a reply is sent, so it must be configured after the
+    # tool registry: every action it can take is gated on that tool being enabled.
+    expressive = expression.configure(CONFIG.get("expression"), MODEL)
+    print(f"Spontaneous expression: {', '.join(expressive) if expressive else 'off'}")
 
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
     tools.init_reminders(str(project_path(CONFIG.get("reminders_file", "./bot_reminders.json"))))

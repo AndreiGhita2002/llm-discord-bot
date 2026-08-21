@@ -49,6 +49,9 @@ class ToolContext:
     # Set once the reply carrying the track line has actually been sent, so the caller knows
     # whether it still needs to announce the music itself.
     music_announced: bool = False
+    # Tools that actually ran this turn. Used by the claim check, and by the expression pass so
+    # it never offers an action the model already took while replying.
+    executed_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -403,6 +406,28 @@ async def _set_nickname(args: dict, ctx: ToolContext) -> str:
         return f"Could not change nickname: {e}"
 
 
+async def _set_about(args: dict, ctx: ToolContext) -> str:
+    """Rewrite the bot's own "About Me" blurb on its Discord profile.
+
+    Unlike nickname (per-server) and status (transient), this is global and sticks until
+    changed again, so it's the most permanent thing the bot can say about itself.
+    PATCH /applications/@me is allowed for a bot editing its OWN application.
+    """
+    if ctx.client is None:
+        return "No client available to set my About Me."
+    text = str(args["text"])[:400]
+    try:
+        app = ctx.client.application
+        if app is None:
+            app = await ctx.client.application_info()
+        await app.edit(description=text)
+        return f"About Me set to: {text}"
+    except discord.Forbidden:
+        return "Not allowed to edit my own About Me."
+    except Exception as e:
+        return f"Could not set About Me: {e}"
+
+
 async def _get_user_info(args: dict, ctx: ToolContext) -> str:
     if ctx.message is None or ctx.message.guild is None:
         return "User info is only available inside a server."
@@ -579,6 +604,14 @@ _REGISTRY: list[Tool] = [
         "change, switch or update your name. Writing the new name in your reply does nothing.",
         {"nickname": {"type": "string", "description": "The new nickname."}}, ["nickname"],
     ), _set_nickname, needs_discord=True),
+    Tool("set_about", _fn(
+        "set_about",
+        "Rewrite your own 'About Me' blurb on your Discord profile. Unlike your status this "
+        "is permanent until you change it again, so keep it something you'd stand behind. "
+        "Call this when asked to change your bio/about, or when yours has gone stale.",
+        {"text": {"type": "string", "description": "The new About Me text (max 400 chars)."}},
+        ["text"],
+    ), _set_about, needs_discord=True),
     Tool("get_user_info", _fn(
         "get_user_info", "Look up a server member's join date, account age and roles by user_id.",
         {"user_id": {"type": "string", "description": "The numeric Discord user id."}}, ["user_id"],

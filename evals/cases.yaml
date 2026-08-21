@@ -266,30 +266,16 @@
 # reacting, and reacting to everything - not to pin a specific number.
 # ---------------------------------------------------------------------------------------
 
-- id: spontaneous-good-news
-  tags: [reaction, spontaneous]
-  history:
-    - {from: dave, id: "222", text: "I got the job!! starting in september"}
-  user: "@Kronk did you see, I got it"
-  expect:
-    rate:
-      add_reaction: [0.5, 1.0]
-
-- id: spontaneous-joke
-  tags: [reaction, spontaneous]
-  history:
-    - {from: dave, id: "222", text: "my code review comment was just 'no.' and nothing else"}
-  user: "@Kronk tell me that's not the funniest thing you've read today"
-  expect:
-    rate:
-      add_reaction: [0.5, 1.0]
-
-- id: spontaneous-bad-news
-  tags: [reaction, spontaneous]
-  user: "@Kronk my dog died this morning, feeling pretty rough"
-  expect:
-    rate:
-      add_reaction: [0.3, 1.0]
+# NOTE: the three cases that used to live here ("should react to good news / a joke / bad
+# news") measured whether the MAIN model reacts unprompted while replying. It doesn't - 10%,
+# 10% and 20% on the deployed model - and that is now understood to be structural rather than
+# fixable by wording: while composing a reply, a text answer already satisfies the turn, so an
+# optional tool call loses to it. Spontaneity moved to the separate expression pass, so those
+# cases were measuring a path that is no longer responsible for the behaviour. They now live in
+# `evals/expression_scenarios.py`, which measures the pass that actually decides.
+#
+# The restraint half stays here, because the main model CAN still react while replying and
+# shouldn't do it on routine chatter.
 
 # The other half of the behaviour: mundane exchanges must NOT collect a reaction, or the
 # reaction stops carrying meaning. Graded strictly - add_reaction is normally tolerated on a

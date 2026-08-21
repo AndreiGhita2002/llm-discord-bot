@@ -212,6 +212,22 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ## Changelog
 
+### v0.2.6
+
+- **Kronk now acts on his own initiative**: he reacts to messages that land, quietly remembers
+  durable facts about people ("I'm allergic to shellfish"), and occasionally changes his status,
+  nickname or About Me — none of it needing to be asked for. Asking the main model to do this
+  while replying does not work (measured at 10–20% on messages that plainly deserved a
+  reaction), because a text answer already satisfies the turn and an optional tool call loses to
+  it. So it runs as a separate decision *after* the reply is sent: no added latency, and
+  frequency is enforced by `chance`/`cooldown` in config rather than requested in a prompt.
+  Configure it under `expression:` — every action can be tuned or switched off.
+- **New `set_about` tool**: the bot can rewrite its own Discord "About Me" blurb.
+- **Frequency-based evals**: cases can now assert how *often* a tool fires across runs
+  (`expect.rate`), for behaviour that only exists in aggregate — one reaction is correct on any
+  single run, and so is one silence; what's wrong is 0% or 100%. The report always prints the
+  observed rate. `evals/expression_scenarios.py` measures the spontaneity decision live.
+
 ### v0.2.5
 
 - **Fixed the real cause of flaky tool calling**: every request ran in Ollama's default
