@@ -72,7 +72,10 @@ _RULES: list[tuple[str, tuple[str, ...], re.Pattern]] = [
         # a false positive, so the object must look like an emoji or a :shortcode:.
         rf"|(?:slapped|stuck|dropped|threw|put|whacked|plonked)\s+(?:an?|the)\s+(?:[^\s\w]{{1,4}}|:[a-z0-9_]+:)\s+on"
         rf"|(?:gave|given|slapped)\s+(?:it|that|this|your\s+message)\s+an?\s+(?:[^\s\w]{{1,4}}|:[a-z0-9_]+:)"
-        rf"|reaction\s+(?:added|is\s+(?:on|up|there)|incoming))\b"
+        # "is on" must end the clause: production said "the 🔥 reaction is on fire today... too
+        # hot for me to grab it", an HONEST failure report, and matching inside it cost a
+        # correction round on a good reply. A trailing adverb is still allowed ("is up now").
+        rf"|reaction\s+(?:added|incoming|is\s+(?:on|up|there)(?:\s+now)?(?!\s+\w)))\b"
         rf"|(?:[^\s\w]{{1,4}}|:[a-z0-9_]+:)\s+(?:slapped|stuck|added|dropped|plonked)\s+on\b",
         re.IGNORECASE)),
 

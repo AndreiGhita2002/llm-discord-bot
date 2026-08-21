@@ -192,13 +192,23 @@ A `tool: none` case tolerates `add_reaction` (`EXPRESSIVE_TOOLS`): a reaction is
 not a consequential action, and failing the bot for being expressive would tune the prompt in
 exactly the wrong direction.
 
-Baselines as of 2026-08-20, `qwen3.5:9b` locally (24 cases x 3 runs): **94%** with the guard
-on, **99%** with `--no-guard`. That gap is sampling noise on tool-CHOICE cases, not the guard:
-**the claim check fired 0 times in 144 samples** - this model family didn't fabricate an action
-once. So the guard currently costs nothing (no extra rounds, and zero false positives across 144
-real replies, which is the precision evidence the unit tests can't give) but has no measured
-recall benefit yet. It remains insurance for the deployed 35b, which is where the reported
-"says Done but did nothing" behaviour actually comes from and has still not been measured.
+Measured on the DEPLOYED `qwen3.5:35b-a3b` (2026-08-21, 10 runs per case):
+
+| | before | after |
+|---|---|---|
+| `--tag action` (14 cases) | 89% | **97%** (136/140) |
+| `--tag negative --tag lookup` (9 cases) | - | **99%** (89/90) |
+| `music-chat-not-a-request` (over-searching) | 33% | **90%** |
+| `fail-search-unavailable` (the repeat-call spiral) | 0% | **100%** |
+
+"Before" is the same model and cases with a 4096-token window and the original tool
+descriptions. Three changes account for the difference, in rough order of impact: `num_ctx`
+(the system prompt was being truncated), the tool descriptions (each now names WHEN to call it
+and says that saying so isn't doing it), and cross-round call deduplication.
+
+What remains is `add_reaction`, at 9/10 - the only action a model can convincingly fake, since
+typing 🔥 looks like reacting. It is also the least harmful to miss. The claim guard fired once
+in 140 samples and successfully converted it into a real `set_reminder` call.
 
 **Failing tools were the most suspicious untested path** - every stub succeeds by default, and
 "Reacted! 🔥" after a permissions error is the same lie as never calling the tool. The `failure`
@@ -209,11 +219,12 @@ writing reply regexes: the first attempt hand-rolled them and failed honest repl
 "I'll get it queued up once you join" (an offer, not a claim) - exactly the tense/hedge problem
 claims.py already solves. qwen3.5:9b scored 12/12 on these.
 
-The real failure this surfaced is the opposite of fabrication: **over-eager searching**.
-`music-chat-not-a-request` ("what do you reckon is the best A-ha song") scored 1/3 - the model
-web_searches an opinion question, sometimes 3-4 times in a row, exhausts `max_tool_rounds` and
-returns an EMPTY reply, so the user gets main.py's "I'm not sure what to say to that. 🥒"
-failsafe. Note `llama3.1:8b` failed the same case, so it isn't model-specific.
+**Over-eager searching** (fixed, kept here because the cause is instructive): the model would
+web_search an opinion question repeatedly, exhaust `max_tool_rounds` and return an EMPTY reply,
+so the user got the "I'm not sure what to say to that. 🥒" failsafe. Two causes, both since
+addressed - `web_search`'s description said "use only when... it is an intensive operation"
+while the system prompt said "DEFAULT to using them", so the model held both signals at once;
+and dedup was per-round, so an identical retry in a later round ran again.
 
 ## Memory System
 
@@ -365,7 +376,8 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Tool-call announcements: bot posts "Looking up …" before lookups (`announce_tools`).
 [x] Tool-call validation: `claims.py` catches replies claiming an action no tool performed and forces one corrective round; `evals/` measures how often it happens (see the section above). Claim detector has 68 unit tests; the eval harness has 24 cases.
 [ ] Run the evals against the DEPLOYED model: local baselines are `qwen3.5:9b` (94% guard on / 99% guard off) and `llama3.1:8b` (83%), neither of which is what ships. The laptop CANNOT run `qwen3.5:35b-a3b` - 23GB of weights against 18GB of RAM drove swap to 19GB. Run `uv run python evals/run_evals.py --runs 10` on the mini, with and without `--no-guard`.
-[ ] Re-measure everything after the num_ctx fix: every number recorded above (35b-a3b 89%, qwen3.5:9b 81% on the mini, 94% locally) was taken with a 4096-token window, i.e. with the system prompt being truncated. They are all suspect. Re-run `--runs 10 --tag action` on the mini before drawing any conclusion about which MODEL is better - the 9b's many empty replies on the mini are the signature of overflow, not of the model.
+[x] Re-measured on the deployed model after num_ctx + tool descriptions + dedup: 89% -> 97% on action cases, 99% on negative/lookup (see the table above). NOTE the earlier model comparison (qwen3.5:9b scoring 81% on the mini) was run with the 4096 window and is void - its empty replies were overflow, not the model. If you want that comparison, redo it now.
+[ ] `add_reaction` is the last weak tool at 9/10: the model announces the reaction in text ("I shall kronkify this moment right away! 🔥") or just types the emoji instead of calling it. Reactions are uniquely fakeable - no one can type a poll or a rename. Options if it becomes annoying: a claim rule for INTENT ("let me react", "I shall...") so the guard forces a correction round, or accept it as the least harmful miss.
 [ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
 [ ] Leaked tool calls: `llama3.1:8b` sometimes emits `{"name": "add_reaction", "parameters": {...}}` as message TEXT instead of a native tool call, so the user sees raw JSON and the action never happens. Caught by the evals but not guarded against - if qwen3.5 ever does this, detect a JSON tool-call blob in the reply and either execute it or suppress it.
 [ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
