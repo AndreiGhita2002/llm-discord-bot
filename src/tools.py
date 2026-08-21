@@ -845,6 +845,24 @@ def all_names() -> list[str]:
     return list(_BY_NAME)
 
 
+def arg_names(name: str) -> list[str]:
+    """A tool's parameter names, in schema order.
+
+    Used to map POSITIONAL arguments from a call the model typed as prose -
+    `set_reminder(10, "pizza")` - onto the names the handler expects. Schema order is
+    declaration order, which is what a model writing a positional call will assume too.
+    """
+    tool = _BY_NAME.get(name)
+    if tool is None:
+        return []
+    return list(tool.schema["function"]["parameters"].get("properties", {}))
+
+
+def arg_names_map() -> dict[str, list[str]]:
+    """Every tool's parameter names, for the typed-call parser."""
+    return {name: arg_names(name) for name in _BY_NAME}
+
+
 def is_enabled(name: str) -> bool:
     """Whether a given tool is currently active."""
     return name in _enabled

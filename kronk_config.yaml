@@ -294,6 +294,14 @@ num_ctx: 16384
 # fires with `uv run python evals/run_evals.py`. Set false to disable the check entirely.
 claim_check: true
 
+# When the model writes a tool call out as TEXT instead of calling it - production produced
+# `set_nickname("Nour-Special-Kronk") runs successfully!` with nothing actually run - perform
+# the call for real and let it finish its reply from the result. Both the tool and its
+# arguments are unambiguous in that text, so this turns the failure into a success instead of
+# spending a round asking the model to try again, and the raw call never reaches the channel.
+# Set false to fall back to the correction round alone.
+execute_typed_calls: true
+
 # Reasoning models (like qwen3.5) do an internal "thinking" pass before replying, which makes
 # them noticeably smarter on complex questions. The reasoning goes in a separate field and is
 # NEVER posted to chat (and any inline <think> tags are stripped as a safety net). While it's

@@ -17,8 +17,12 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import claims  # noqa: E402
 import main  # noqa: E402
 import tools  # noqa: E402
+
+# The typed-call rescue needs the registry (names + parameter names for positional args).
+claims.configure_tool_names(tools.arg_names_map())
 
 
 def reply(content="", calls=()):
@@ -159,6 +163,68 @@ async def differing_args_still_run():
         reply("Verstappen won."),
     ])
     assert EXECUTED == ["web_search", "web_search"], f"second search was swallowed: {EXECUTED}"
+
+
+@check
+async def a_call_typed_as_text_is_executed_for_real():
+    """Production: set_nickname("...") runs successfully! - with nothing actually run."""
+    final, seen = await run_loop([
+        reply('set_nickname("Nour-Special-Kronk") runs successfully! 🎯✨'),
+        reply("Renamed! Feast your eyes."),
+    ])
+    assert EXECUTED == ["set_nickname"], f"the typed call was not executed: {EXECUTED}"
+    rescued = [m for m in seen[-1]
+               if isinstance(m, dict) and "wrote this call out as text" in str(m.get("content"))]
+    assert rescued, "no tool result was fed back after the rescue"
+    assert final == "Renamed! Feast your eyes.", final
+    assert "set_nickname(" not in final, "the raw call reached the user"
+
+
+@check
+async def a_typed_call_with_arguments_keeps_them():
+    final, seen = await run_loop([
+        reply('set_reminder(minutes=10, text="take the pizza out") - all set!'),
+        reply("Timer's going."),
+    ])
+    assert EXECUTED == ["set_reminder"], EXECUTED
+
+
+@check
+async def a_rescued_call_satisfies_the_claim_check():
+    """Executing it must count as backing the claim - no correction round on top."""
+    final, seen = await run_loop([
+        reply('set_nickname("Bucket") runs successfully! Done!'),
+        reply("Bucket it is."),
+    ])
+    assert len(seen) == 2, f"a correction round ran as well: {len(seen)} calls"
+    assert not corrections_in(seen[-1]), "corrected a call that was actually executed"
+
+
+@check
+async def typed_calls_do_not_loop_forever():
+    """A model that keeps typing calls must stop being rescued, not spin."""
+    final, seen = await run_loop([
+        reply('set_status("one")'),
+        reply('set_status("two")'),
+        reply('set_status("three")'),
+        reply("Fine, I'll stop."),
+    ])
+    assert len(EXECUTED) <= main.MAX_TYPED_ROUNDS, f"unbounded rescue: {EXECUTED}"
+
+
+@check
+async def rescue_can_be_switched_off():
+    real = main.EXECUTE_TYPED_CALLS
+    main.EXECUTE_TYPED_CALLS = False
+    try:
+        final, seen = await run_loop([
+            reply('set_nickname("Bucket") runs successfully!'),
+            reply("Sorry - want me to actually rename myself?"),
+        ])
+        assert EXECUTED == [], f"executed with the feature off: {EXECUTED}"
+        assert corrections_in(seen[-1]), "should fall back to a correction round"
+    finally:
+        main.EXECUTE_TYPED_CALLS = real
 
 
 async def main_async() -> int:

@@ -138,6 +138,11 @@ MAX_TOOL_ROUNDS = CONFIG.get("max_tool_rounds", 5)
 # Catch replies that claim an action ("Reminder set!") when no tool actually ran, and give the
 # model one round to fix it. See claims.py; measured by evals/run_evals.py.
 CLAIM_CHECK = CONFIG.get("claim_check", True)
+# When the model writes a tool call out as text instead of calling it - set_nickname("Bucket")
+# runs successfully! - perform the call for real rather than only correcting the claim. The
+# intent and arguments are unambiguous, so this turns a failure into a success.
+EXECUTE_TYPED_CALLS = CONFIG.get("execute_typed_calls", True)
+MAX_TYPED_ROUNDS = 2  # bound: a model that keeps typing calls must not loop forever
 # Whether the model does its (slow) internal "thinking" pass. Off by default: much faster,
 # and stops reasoning traces from leaking into replies on reasoning models like qwen3.5.
 MODEL_THINK = CONFIG.get("use_thinking", False)
@@ -368,6 +373,7 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
     executed_tools: list[str] = []  # what actually ran, for the claim check below
     corrected = False               # the claim check gets exactly one shot per turn
+    typed_rounds = 0                # times we rescued a call the model typed instead of made
     # Results of every distinct call made THIS TURN, keyed by (tool, args). Deduplication has
     # to span rounds, not just sit inside one: when a tool returns something unhelpful ("web
     # access isn't available") the model's instinct is to call it again, identically, until
@@ -388,6 +394,46 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
         tool_calls = response.message.tool_calls
         if not tool_calls:
             content = response.message.content or ""
+
+            # The model wrote a call out as prose instead of making it. Both the tool and its
+            # arguments are unambiguous there, so run it for real and feed the results back:
+            # the loop then finishes the reply normally, the action has actually happened, and
+            # the user never sees the raw call. Strictly better than a correction round, which
+            # only asks the model to try again. No announcement is posted on this path - the
+            # model has already written its own line about doing it.
+            if EXECUTE_TYPED_CALLS and typed_rounds < MAX_TYPED_ROUNDS:
+                typed = [
+                    call for call in claims.extract_typed_calls(content)
+                    if tools.is_enabled(call.name)
+                    and (call.name, str(call.args)) not in prior_results
+                ]
+                if typed:
+                    typed_rounds += 1
+                    conversation.append(response.message)
+                    for call in typed:
+                        log.warning(
+                            f"Model typed {call.matched!r} instead of calling it - "
+                            f"executing {call.name}({call.args}) for real"
+                        )
+                        try:
+                            result = await tools.execute(call.name, call.args,
+                                                         ctx or ToolContext())
+                            executed_tools.append(call.name)
+                            if ctx is not None:
+                                ctx.executed_tools.append(call.name)
+                        except Exception as e:
+                            log.warning(f"Rescued call {call.name} failed: {e}")
+                            result = f"Tool error: {e}"
+                        prior_results[(call.name, str(call.args))] = result
+                        conversation.append({
+                            "role": "tool",
+                            "tool_name": call.name,
+                            "content": (f"{result}\n(You wrote this call out as text rather "
+                                        f"than calling it. It has now been run for you - "
+                                        f"answer normally, and never write a call out again.)"),
+                        })
+                    continue
+
             # The model has decided it's finished. Before that answer goes to the user, check
             # it doesn't claim an action no tool performed ("Done!", "Reminder set!"). Prompt
             # instructions alone don't stop this - it's a sampling failure, not a
@@ -498,7 +544,8 @@ async def on_ready():
     claims.configure_self_names(client.user.display_name, client.user.name)
     # So a call typed as prose - set_nickname("Bucket") runs successfully! - is recognised as
     # the fabrication it is. Full registry, not just the enabled tools.
-    claims.configure_tool_names(tools.all_names())
+    # The mapping (not just names) so a typed call's positional arguments can be resolved.
+    claims.configure_tool_names(tools.arg_names_map())
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{discord_user_id}}", str(client.user.id))
     default_timezone = CONFIG.get('default_timezone', 'Europe/London')
     SYSTEM_PROMPT = SYSTEM_PROMPT.replace("{{time_zone}}", default_timezone)

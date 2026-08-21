@@ -212,6 +212,15 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ## Changelog
 
+### v0.2.7
+
+- **Typed-out tool calls now actually run**: Kronk would sometimes write
+  `set_nickname("Nour-Special-Kronk") runs successfully!` as plain text and change nothing —
+  telling you it worked when it hadn't. Those are now detected *and executed for real*, with the
+  result fed back so he finishes the reply normally; the raw call never reaches the channel.
+  Keyword, positional, `<tag>` and JSON forms are all understood. Set `execute_typed_calls:
+  false` to only correct them instead.
+
 ### v0.2.6
 
 - **Kronk now acts on his own initiative**: he reacts to messages that land, quietly remembers

@@ -18,6 +18,7 @@ hedges, negates, asks, or offers is discarded before matching (see `_HEDGE_RE`) 
 set a reminder?" and "I can't change my nickname" are not claims.
 """
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -189,7 +190,80 @@ _WORD_RE = re.compile(r"[A-Za-z']+")
 # Tool names the model might type into a reply instead of calling. Populated at startup from
 # the registry (main.py -> claims.configure_tool_names).
 _TOOL_NAMES: set[str] = set()
+_TOOL_ARGS: dict[str, list[str]] = {}
 _TOOL_SYNTAX_RE: Optional[re.Pattern] = None
+
+
+@dataclass(frozen=True)
+class TypedCall:
+    """A tool call the model wrote out as text instead of actually making."""
+    name: str
+    args: dict
+    matched: str
+
+
+def _split_top_level(text: str) -> list[str]:
+    """Split on commas that aren't inside quotes, brackets or braces."""
+    parts, depth, quote, current = [], 0, "", []
+    for char in text:
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in "\"'":
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(char)
+    if current:
+        parts.append("".join(current))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _coerce(raw: str):
+    """Turn one written argument into a value, preferring JSON where it parses."""
+    raw = raw.strip()
+    try:
+        return json.loads(raw)  # numbers, booleans, lists, quoted strings
+    except (json.JSONDecodeError, ValueError):
+        pass
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+_KWARG_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[=:]\s*(.+)$", re.DOTALL)
+
+
+def _parse_arguments(body: str, arg_names: list[str]) -> dict:
+    """Parse a written argument list into {name: value}.
+
+    Handles keyword form (`minutes=10, text="pizza"`), positional form mapped onto the
+    schema's parameter order, and a bare JSON object.
+    """
+    body = body.strip()
+    if body.startswith("{"):
+        try:
+            data = json.loads(body)
+            return data if isinstance(data, dict) else {}
+        except (json.JSONDecodeError, ValueError):
+            return {}
+
+    args, positional = {}, []
+    for part in _split_top_level(body):
+        match = _KWARG_RE.match(part)
+        if match and match.group(1) in arg_names:
+            args[match.group(1)] = _coerce(match.group(2))
+        else:
+            positional.append(_coerce(part))
+    for name, value in zip([n for n in arg_names if n not in args], positional):
+        args[name] = value
+    return args
 
 
 def configure_tool_names(names) -> None:
@@ -203,7 +277,12 @@ def configure_tool_names(names) -> None:
     Only call-SHAPED mentions count: `name(`, `<name>`, or a JSON "name": "tool" blob. A bare
     mention is legitimate ("you can ask me to use set_nickname") and must not be flagged.
     """
-    global _TOOL_NAMES, _TOOL_SYNTAX_RE
+    global _TOOL_NAMES, _TOOL_SYNTAX_RE, _TOOL_ARGS
+    # Accepts a plain list of names, or {name: [parameter names]} - the mapping additionally
+    # lets extract_typed_calls() resolve positional arguments.
+    if isinstance(names, dict):
+        _TOOL_ARGS = {str(k): list(v) for k, v in names.items()}
+        names = list(names)
     _TOOL_NAMES = {str(n) for n in names if n}
     if not _TOOL_NAMES:
         _TOOL_SYNTAX_RE = None
@@ -215,6 +294,71 @@ def configure_tool_names(names) -> None:
         rf"|[\"']name[\"']\s*:\s*[\"'](?P<json>{alternatives})[\"'])",  # {"name": "..."}
         re.IGNORECASE,
     )
+
+
+def _balanced_body(text: str, open_at: int) -> tuple[str, int]:
+    """Content between the bracket at `open_at` and its match, plus the index after it."""
+    depth, quote, start = 0, "", open_at + 1
+    for i in range(open_at, len(text)):
+        char = text[i]
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start:i], i + 1
+    return "", len(text)
+
+
+def extract_typed_calls(reply: str) -> list[TypedCall]:
+    """Tool calls the model WROTE OUT, parsed into something executable.
+
+    The model produced `set_nickname("Nour-Special-Kronk") runs successfully!` and nothing
+    happened. The intent and the arguments are both unambiguous there, so the loop can simply
+    perform the call rather than spending a round asking the model to try again - a failure
+    becomes a success, and the user never sees the raw call.
+
+    Returns only calls whose arguments actually parsed; a call with an unreadable body is
+    still a false claim (find_claims catches it) but not something to execute blind.
+    """
+    if _TOOL_SYNTAX_RE is None:
+        return []
+    calls, seen = [], set()
+    for match in _TOOL_SYNTAX_RE.finditer(reply or ""):
+        name = match.group("call") or match.group("tag") or match.group("json")
+        if not name:
+            continue
+        arg_names = _TOOL_ARGS.get(name, [])
+        if match.group("call"):
+            body, _ = _balanced_body(reply, match.end() - 1)
+            args = _parse_arguments(body, arg_names)
+        elif match.group("tag"):
+            # <add_reaction>emoji: 🔥</add_reaction>, or a bare body for a single-argument tool.
+            closing = re.search(rf"</\s*{re.escape(name)}\s*>", reply[match.end():],
+                                re.IGNORECASE)
+            body = reply[match.end():match.end() + closing.start()] if closing else ""
+            args = _parse_arguments(body, arg_names)
+            if not args and body.strip() and arg_names:
+                args = {arg_names[0]: body.strip()}
+        else:
+            # {"name": "add_reaction", "parameters"/"arguments": {...}}
+            blob = re.search(r"[\"\']?(?:parameters|arguments)[\"\']?\s*:\s*(\{.*?\})",
+                             reply[match.end():], re.DOTALL)
+            args = _parse_arguments(blob.group(1), arg_names) if blob else {}
+        if not args:
+            continue
+        key = (name, json.dumps(args, sort_keys=True, default=str))
+        if key in seen:
+            continue
+        seen.add(key)
+        calls.append(TypedCall(name, args, match.group(0).strip()))
+    return calls
 
 
 def _tool_syntax_claims(sentence: str) -> list[Claim]:

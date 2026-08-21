@@ -218,6 +218,15 @@ could catch these because nothing about them is English. Only call-SHAPED mentio
 me to use set_nickname") is perfectly honest. The same shape covers a leaked native tool call,
 which llama3.1 emits as raw JSON.
 
+A typed call is **executed, not just corrected** (`claims.extract_typed_calls` +
+`EXECUTE_TYPED_CALLS` in query_ollama). Both the tool and its arguments are unambiguous in
+`set_nickname("Bucket")`, so the loop runs it, feeds the result back as a normal tool message,
+and lets the model finish its reply from there - the action actually happens, and the raw call
+never reaches the channel. The parser handles keyword form, positional form (mapped onto
+`tools.arg_names()`, i.e. schema order), `<tag>` bodies and JSON blobs; a call whose arguments
+don't parse is left to the correction round instead of being run blind. Bounded by
+`MAX_TYPED_ROUNDS` so a model that keeps typing calls can't spin.
+
 **Precision over recall, deliberately.** A missed lie costs one bad reply; a false positive
 rewrites a perfectly good answer and burns a model round. So a sentence that hedges, negates,
 asks or offers is vetoed before matching (`_HEDGE_RE`: "want me to set a reminder?"), as is one
@@ -436,7 +445,7 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [ ] `add_reaction` is the last weak tool at 9/10: the model announces the reaction in text ("I shall kronkify this moment right away! 🔥") or just types the emoji instead of calling it. Reactions are uniquely fakeable - no one can type a poll or a rename. Options if it becomes annoying: a claim rule for INTENT ("let me react", "I shall...") so the guard forces a correction round, or accept it as the least harmful miss.
 [ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
 [x] Leaked/typed tool calls: the deployed qwen3.5 does this too, in prose form - `set_nickname("X") runs successfully!` with nothing run. The detector now recognises call-shaped text (`name(`, `<name>`, `"name": "tool"`) so the guard forces a correction round.
-[ ] Consider EXECUTING a typed tool call rather than only correcting it: when the model writes `set_nickname("Bucket")` the intent and arguments are unambiguous, so parsing and running it would turn a failure straight into a success instead of spending a round. Deferred because arg parsing from free text is fragile and a correction round is already safe.
+[x] Typed tool calls are now EXECUTED, not just corrected: `set_nickname("Bucket") runs successfully!` performs the rename for real and the model finishes its reply from the result. Handles keyword, positional, `<tag>` and JSON forms; unparseable ones fall back to the correction round.
 [ ] Live-verify Discord-action tools (add_reaction, set_status, set_nickname, get_user_info, create_poll, start_thread) on the deployed bot - unit + mock-integration tested, but not yet run against real Discord. create_poll needs discord.py 2.4+.
 [x] Persist reminders: stored in `reminders_file` (default `./bot_reminders.json`); rescheduled on startup via `tools.reschedule_reminders()` in on_ready, overdue ones fire immediately.
 [x] Memory storage: migrated JSON -> SQLite + sqlite-vec (binary float32 vectors, zlib-compressed text). More efficient + not plaintext on disk. Verified with a fake embedding; run once against real `nomic-embed-text` on the deployed bot.
