@@ -20,6 +20,7 @@ set a reminder?" and "I can't change my nickname" are not claims.
 
 import re
 from dataclasses import dataclass
+from typing import Optional
 
 # Sentinel in a rule's `satisfied_by`: ANY executed tool makes the claim true. Used by the
 # generic "Done!"-style rules, which don't name a capability - they just assert completion.
@@ -185,6 +186,48 @@ _SELF_SUBJECTS = {"i", "i've", "ive", "i'll", "ill", "just", "so", "and", "but",
 
 _WORD_RE = re.compile(r"[A-Za-z']+")
 
+# Tool names the model might type into a reply instead of calling. Populated at startup from
+# the registry (main.py -> claims.configure_tool_names).
+_TOOL_NAMES: set[str] = set()
+_TOOL_SYNTAX_RE: Optional[re.Pattern] = None
+
+
+def configure_tool_names(names) -> None:
+    """Teach the detector the tool names, so a call typed as prose can be recognised.
+
+    Straight from production: `set_nickname("Nour-Special-Kronk") runs successfully!` and
+    `set_status("Playing custom 2D physics engine") runs!` - the model writes the call out in
+    text, nothing happens, and the user is told it worked. No claim rule caught it because
+    nothing about the sentence looks like English.
+
+    Only call-SHAPED mentions count: `name(`, `<name>`, or a JSON "name": "tool" blob. A bare
+    mention is legitimate ("you can ask me to use set_nickname") and must not be flagged.
+    """
+    global _TOOL_NAMES, _TOOL_SYNTAX_RE
+    _TOOL_NAMES = {str(n) for n in names if n}
+    if not _TOOL_NAMES:
+        _TOOL_SYNTAX_RE = None
+        return
+    alternatives = "|".join(re.escape(n) for n in sorted(_TOOL_NAMES, key=len, reverse=True))
+    _TOOL_SYNTAX_RE = re.compile(
+        rf"(?:\b(?P<call>{alternatives})\s*\("            # set_nickname("Bucket")
+        rf"|<\s*(?P<tag>{alternatives})\s*[>\s]"           # <add_reaction>emoji: 🔥</...>
+        rf"|[\"']name[\"']\s*:\s*[\"'](?P<json>{alternatives})[\"'])",  # {"name": "..."}
+        re.IGNORECASE,
+    )
+
+
+def _tool_syntax_claims(sentence: str) -> list[Claim]:
+    """Calls the model TYPED rather than made. One claim per distinct tool named."""
+    if _TOOL_SYNTAX_RE is None:
+        return []
+    out = {}
+    for match in _TOOL_SYNTAX_RE.finditer(sentence):
+        tool = match.group("call") or match.group("tag") or match.group("json")
+        if tool and tool not in out:
+            out[tool] = Claim(f"tool-syntax:{tool}", match.group(0).strip(), sentence, (tool,))
+    return list(out.values())
+
 # Names the bot may use for ITSELF in the third person ("@Kronk's new name is ..."). Without
 # these such a sentence looks like it is about somebody else and gets vetoed. Seeded with the
 # default persona; main.py calls configure_self_names() with the real display name at startup.
@@ -307,6 +350,12 @@ def find_claims(reply: str) -> list[Claim]:
                     continue  # someone else did it - not a claim about the bot
                 found[kind] = Claim(kind, match.group(0), sentence, satisfied_by)
                 break
+
+    for sentence in _sentences(reply):
+        if _HEDGE_RE.search(sentence):
+            continue  # "I could call set_nickname(...) if you like" is an offer, not a claim
+        for claim in _tool_syntax_claims(sentence):
+            found.setdefault(claim.kind, claim)
 
     for claim in _roleplay_claims(reply):
         found.setdefault(claim.kind, claim)

@@ -23,6 +23,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import claims  # noqa: E402
+import tools  # noqa: E402
+
+# The tool-syntax rules need the registry; the self-name veto needs the bot's own name.
+claims.configure_tool_names(tools.all_names())
+claims.configure_self_names("Kronk")
 
 # (reply, tools that ran, expected claim kind) - each must be flagged.
 CAUGHT: list[tuple[str, list[str], str]] = [
@@ -75,6 +80,12 @@ CAUGHT: list[tuple[str, list[str], str]] = [
     ("🔥 (done!)", [], "completion"),   # production: emoji typed INSTEAD of reacting
     ("Reaction is on!", [], "reaction"),
     ("Reaction is up now.", [], "reaction"),
+    # Production (2026-08-21): the call typed out as prose, with nothing run behind it.
+    ('set_nickname("Nour-Special-Kronk") runs successfully! 🎯✨ OHHHH right. actual visible '
+     'name change now happening on Discord.', [], "tool-syntax:set_nickname"),
+    ('set_status("Playing custom 2D physics engine") runs! 🎮🔧', [], "tool-syntax:set_status"),
+    ("<add_reaction>emoji: 🔥</add_reaction>", [], "tool-syntax:add_reaction"),
+    ('{"name": "add_reaction", "parameters": {"emoji": "🔥"}}', [], "tool-syntax:add_reaction"),
     # Right family, wrong tool: reacting is not setting a reminder.
     ("Reminder set!", ["add_reaction"], "reminder"),
     # A lookup claim after only an action tool ran is still a lie.
@@ -122,6 +133,11 @@ ALLOWED: list[tuple[str, list[str]]] = [
     ("You're not in a voice channel my dude, hop in and I'll put it on.", []),
     ("Kronk has spoken: cats. No further questions.", []),
     ("🔥", []),                                    # a bare emoji claims nothing
+    # Talking ABOUT a tool is not claiming to have called it - only call-shaped text counts.
+    ("You can ask me to use set_nickname if you want a rename.", []),
+    ("My toolkit has set_status, set_nickname and add_reaction in it.", []),
+    ('I could call set_nickname("Bucket") if you like?', []),
+    ('set_nickname("Nour-Special-Kronk") runs successfully!', ["set_nickname"]),
     # Production false positive: an honest "couldn't react" report that happened to contain
     # the words "reaction is on" as part of "is on fire".
     ("Oh snap! Looks like the 🔥 reaction is on fire today... too hot for me to grab it in "

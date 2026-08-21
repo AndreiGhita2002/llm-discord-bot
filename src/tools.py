@@ -835,6 +835,16 @@ def get_schemas() -> Optional[list[dict]]:
     return schemas or None
 
 
+def all_names() -> list[str]:
+    """Every tool name in the registry, enabled or not.
+
+    The claim detector uses this to spot a tool NAME written into a reply as prose
+    (`set_nickname("Bucket") runs successfully!`), which is a fabricated call, so it needs the
+    full registry rather than only what's currently switched on.
+    """
+    return list(_BY_NAME)
+
+
 def is_enabled(name: str) -> bool:
     """Whether a given tool is currently active."""
     return name in _enabled
