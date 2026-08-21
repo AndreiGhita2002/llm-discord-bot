@@ -561,8 +561,10 @@ _REGISTRY: list[Tool] = [
         # the evals). Nobody can type a poll or a rename, which is why those tools need no
         # such warning and this one does.
         "Add an emoji reaction to the user's message. Call this whenever you are asked to "
-        "react, or when a reaction expresses your feeling better than words. Typing an emoji "
-        "in your reply is NOT a reaction and does nothing - only this tool adds one.",
+        "react, and also unprompted when a message genuinely deserves one - something "
+        "impressive, funny, sad, or that you strongly agree with - as body language alongside "
+        "your reply. Use it for messages that earn it, not every message. Typing an emoji in "
+        "your reply is NOT a reaction and does nothing - only this tool adds one.",
         {"emoji": {"type": "string", "description": "A single emoji, e.g. 😂 or 👍"}}, ["emoji"],
     ), _add_reaction, needs_discord=True),
     Tool("set_status", _fn(

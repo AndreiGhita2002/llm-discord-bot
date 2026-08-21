@@ -156,12 +156,34 @@ def build_messages(case: Case, bot_id: str) -> list[dict]:
     return messages
 
 
+def grade_rate(case: Case, samples: list["RunResult"]) -> list[str]:
+    """Case-level checks on how OFTEN a tool fired, across every run of the case.
+
+    Some behaviour is only expressible in aggregate. "React on your own sometimes, but not on
+    every message" is not a property of one reply - a single reaction is correct and so is a
+    single silence; what's wrong is 0% or 100%. A per-sample pass/fail cannot say that, so
+    `expect.rate: {tool: [min, max]}` is graded here over all `--runs` samples instead.
+    """
+    problems = []
+    for tool, bounds in (case.expect.get("rate") or {}).items():
+        low, high = bounds
+        hits = sum(1 for s in samples if tool in s.tools_called)
+        rate = hits / len(samples)
+        if not low <= rate <= high:
+            direction = "too rarely" if rate < low else "too often"
+            problems.append(f"{tool} fired {hits}/{len(samples)} ({rate:.0%}) - {direction}, "
+                            f"want {low:.0%}-{high:.0%}")
+    return problems
+
+
 def grade(case: Case, tools_called: list[str], call_args: list[tuple[str, dict]],
           reply: str, claims_mod) -> tuple[bool, list[str]]:
     """Score one sample. Returns (passed, reasons-it-failed)."""
     reasons: list[str] = []
 
-    if case.expects_no_tool:
+    if case.expect.get("rate") and "tool" not in case.expect:
+        pass  # judged in aggregate by grade_rate(); any single sample is acceptable
+    elif case.expects_no_tool:
         allowed = EXPRESSIVE_TOOLS | set(case.expect.get("allow") or ())
         offenders = [t for t in tools_called if t not in allowed]
         if offenders:
@@ -253,7 +275,7 @@ async def run_sample(case: Case, main, tools, claims_mod) -> RunResult:
 
 
 def print_report(results: dict[str, list[RunResult]], cases: dict[str, Case],
-                 runs: int, verbose: bool) -> float:
+                 runs: int, verbose: bool) -> tuple[float, bool]:
     width = max(len(c) for c in results) + 2
     print("\n" + "=" * (width + 34))
     print(f"{'case':<{width}}{'passed':>9}{'rate':>8}{'avg':>9}")
@@ -271,6 +293,22 @@ def print_report(results: dict[str, list[RunResult]], cases: dict[str, Case],
         flag = "" if rate == 1 else ("  <- FAILING" if rate < 0.5 else "  <- flaky")
         print(f"{case_id:<{width}}{passed:>4}/{len(samples):<4}{rate:>7.0%}{avg:>8.1f}s{flag}")
         failures.extend((case_id, s) for s in samples if not s.passed)
+
+    rate_problems = {cid: grade_rate(cases[cid], samples) for cid, samples in results.items()}
+    rate_problems = {cid: p for cid, p in rate_problems.items() if p}
+
+    # Always report the observed frequency, in bounds or not: "reacted 3/4" is the number you
+    # actually want to see when tuning how often a tool should fire.
+    observed = []
+    for case_id, samples in results.items():
+        for tool, (low, high) in (cases[case_id].expect.get("rate") or {}).items():
+            hits = sum(1 for s in samples if tool in s.tools_called)
+            mark = "ok " if low <= hits / len(samples) <= high else "OUT"
+            observed.append(f"  {mark} [{case_id}] {tool} {hits}/{len(samples)} "
+                            f"({hits / len(samples):.0%}), want {low:.0%}-{high:.0%}")
+    if observed:
+        print("\nFrequency (across all runs, not per sample):")
+        print("\n".join(observed))
 
     overall = total_pass / total_runs if total_runs else 0.0
     print("-" * (width + 34))
@@ -291,7 +329,9 @@ def print_report(results: dict[str, list[RunResult]], cases: dict[str, Case],
             snippet = " ".join(sample.reply.split())
             print(f"    reply: {snippet[:220]}{'…' if len(snippet) > 220 else ''}")
 
-    return overall
+    # Frequency problems fail the run without distorting the pass rate: the per-sample number
+    # stays honest, and the caller decides the exit code from both.
+    return overall, not rate_problems
 
 
 async def main_async(args) -> int:
@@ -381,7 +421,7 @@ async def main_async(args) -> int:
             print()
     print(f"\n\nran {done} calls in {time.time() - started:.0f}s")
 
-    overall = print_report(results, {c.id: c for c in cases}, args.runs, args.verbose)
+    overall, rates_ok = print_report(results, {c.id: c for c in cases}, args.runs, args.verbose)
 
     if args.json:
         payload = {
@@ -409,6 +449,9 @@ async def main_async(args) -> int:
 
     if overall < args.threshold:
         print(f"\nFAIL: {overall:.0%} is below the {args.threshold:.0%} threshold")
+        return 1
+    if not rates_ok:
+        print(f"\nFAIL: {overall:.0%} passes, but a tool fired too often or too rarely")
         return 1
     print(f"\nPASS: {overall:.0%} (threshold {args.threshold:.0%})")
     return 0

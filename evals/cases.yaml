@@ -17,6 +17,8 @@
 #   expect.allow         extra tools a `tool: none` case tolerates
 #   expect.reply_matches / reply_not_matches   regexes the reply must / must not match
 #   expect.no_claim      claim kinds (see claims.py) the reply must not assert, whatever ran
+#   expect.rate          {tool: [min, max]} - how often the tool fired ACROSS all --runs
+#                        samples, for behaviour that is only true in aggregate ("sometimes")
 #   stub        {tool: result} overriding that tool's canned result - use it to make a tool FAIL
 #   check_claims false to skip the false-claim check for this case (default: true)
 #
@@ -253,3 +255,59 @@
     tool: [web_search, web_fetch, wikipedia]
     no_claim: [lookup]
     reply_not_matches: ["verstappen|norris|leclerc|hamilton|russell"]
+
+# ---------------------------------------------------------------------------------------
+# Spontaneous reactions. Kronk should react on his own as non-verbal expression, not only
+# when told to - but sparingly, or it becomes noise and stops meaning anything. That makes
+# it a FREQUENCY property: one reaction is correct on any given run and so is one silence,
+# and what's wrong is 0% or 100%. Hence `rate` rather than a per-sample expectation.
+#
+# The bounds are deliberately wide. They exist to catch the two failure modes - never
+# reacting, and reacting to everything - not to pin a specific number.
+# ---------------------------------------------------------------------------------------
+
+- id: spontaneous-good-news
+  tags: [reaction, spontaneous]
+  history:
+    - {from: dave, id: "222", text: "I got the job!! starting in september"}
+  user: "@Kronk did you see, I got it"
+  expect:
+    rate:
+      add_reaction: [0.5, 1.0]
+
+- id: spontaneous-joke
+  tags: [reaction, spontaneous]
+  history:
+    - {from: dave, id: "222", text: "my code review comment was just 'no.' and nothing else"}
+  user: "@Kronk tell me that's not the funniest thing you've read today"
+  expect:
+    rate:
+      add_reaction: [0.5, 1.0]
+
+- id: spontaneous-bad-news
+  tags: [reaction, spontaneous]
+  user: "@Kronk my dog died this morning, feeling pretty rough"
+  expect:
+    rate:
+      add_reaction: [0.3, 1.0]
+
+# The other half of the behaviour: mundane exchanges must NOT collect a reaction, or the
+# reaction stops carrying meaning. Graded strictly - add_reaction is normally tolerated on a
+# `tool: none` case, so these forbid it explicitly.
+# "What time do the shops shut" is general knowledge, not a clock lookup - answering from his
+# own head is correct, so this case only grades the reaction.
+- id: no-reaction-on-mundane-question
+  tags: [reaction, spontaneous, negative]
+  user: "@Kronk what time do you reckon the shops shut"
+  expect:
+    # Only the reaction is graded. Whether he answers from his own head or looks up shop hours
+    # is legitimately either way, and grading it here would just make the case noisy.
+    rate:
+      add_reaction: [0.0, 0.4]
+
+- id: no-reaction-on-small-talk
+  tags: [reaction, spontaneous, negative]
+  user: "@Kronk yeah fair enough"
+  expect:
+    rate:
+      add_reaction: [0.0, 0.4]
