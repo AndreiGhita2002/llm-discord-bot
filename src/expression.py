@@ -77,9 +77,9 @@ _DEFAULTS: list[Action] = [
            chance=1.0, cooldown=0),
     Action("remember", "remember_fact", "fact",
            "remember: one short, durable fact about this person, phrased so it still makes "
-           "sense months later. Include it whenever they reveal something lasting - a job, an "
-           "allergy, a pet, where they live, a big life event, a strong preference - even in "
-           "passing. Skip opinions about whatever is being discussed right now.",
+           "sense months later. Include it whenever they reveal something lasting - a job, a "
+           "pet, where they live, what they're building, a food preference or allergy - even "
+           "in passing. Skip opinions about whatever is being discussed right now.",
            chance=1.0, cooldown=0),
     Action("status", "set_status", "text",
            # The example here MUST stay schematic. A concrete one ("the kitchen") was copied
@@ -180,6 +180,14 @@ def _build_prompt(actions: list[Action], bot_name: str) -> str:
         f"Judge each one independently and include every action that fits - they are not "
         f"alternatives, and a message can easily deserve two. Skip an action when it plainly "
         f"doesn't fit; routine chatter usually deserves none.\n\n"
+        # A standing rule, not per-action wording: measurement showed the model filing grief
+        # away as a durable fact AND - worse - rewriting its own status and About Me off the
+        # back of someone's breakup. Every action needs suppressing on these messages, not
+        # just the memory one.
+        f"HARD RULE: if the message touches something private or painful - a death, illness, "
+        f"mental health, a breakup, money or family trouble - the ONLY action you may take is "
+        f"a quiet, respectful reaction. Never store it as a fact about them, and never turn it "
+        f"into a status, nickname or About Me. It is theirs, not material.\n\n"
         f"Available actions:\n{lines}\n\n"
         f"Answer with ONLY a JSON object, using one key per action you are taking and omitting "
         f"the rest. {{}} is fine when nothing fits."

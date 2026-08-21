@@ -663,9 +663,11 @@ _REGISTRY: list[Tool] = [
     # --- memory ---
     Tool("remember_fact", _fn(
         "remember_fact",
-        "Store a fact about a user so you still know it in future conversations. Call this "
-        "whenever someone tells you to remember something. Saying you will remember does "
-        "nothing - only this tool saves it.",
+        "Store an everyday fact about a user so you still know it in future conversations - "
+        "what they do, what they're into, a pet, a food preference. Do not store sensitive or "
+        "private things (health, grief, relationships, money, family trouble) unless they have "
+        "explicitly asked you to remember it. Call this whenever someone tells you to remember "
+        "something. Saying you will remember does nothing - only this tool saves it.",
         {"user_id": {"type": "string", "description": "The numeric Discord user id."},
          "fact": {"type": "string", "description": "The fact to remember."}}, ["user_id", "fact"],
     ), _remember_fact, needs_memory=True),

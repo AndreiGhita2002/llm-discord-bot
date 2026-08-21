@@ -214,6 +214,11 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ### v0.2.7
 
+- **Boundaries**: Kronk no longer plays emotional support. He won't console you or hand out
+  advice you didn't ask for, and won't ask about private matters — while small talk, banter and
+  joining a collective mood stay exactly as they were. He also no longer files away sensitive
+  things people mention: on a bereavement, illness or breakup the only thing he'll do is react
+  quietly, never store it as a fact or turn it into a status or About Me.
 - **Typed-out tool calls now actually run**: Kronk would sometimes write
   `set_nickname("Nour-Special-Kronk") runs successfully!` as plain text and change nothing —
   telling you it worked when it hadn't. Those are now detected *and executed for real*, with the

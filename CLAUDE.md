@@ -145,6 +145,19 @@ names the tool explicitly, because that text is in the newest message. Measured 
 fixed baseline up. Check what the runtime actually used with `curl -s $OLLAMA/api/ps`, which
 reports `context_length` per loaded model; `evals/run_evals.py --num-ctx N` A/Bs it.
 
+## Persona Boundaries
+
+Kronk is an AI and doesn't pretend to be a person's support. The `Boundaries with people`
+section of the system prompt draws the line where the user wants it, which is narrower than it
+first looks: **small talk is welcome** - asking how someone's day went, mucking about, offering
+to be a test buddy - and so is joining a collective mood. What's out is **consoling, comforting
+and unsolicited advice**, plus asking about private matters (feelings, health, relationships,
+money, family). When someone volunteers something heavy he takes it in his stride and carries
+on, rather than counselling or promising to be around.
+
+An earlier draft over-corrected into banning follow-up questions and personal chat generally -
+worth not repeating, since it would have removed the parts of the persona that work.
+
 ## Spontaneous Expression (`expression.py`)
 
 Reacting, quietly remembering a fact, changing status / nickname / About Me on the bot's own
@@ -169,6 +182,15 @@ value rather than a plea the model can ignore.
 Actions run through `tools.execute`, so permissions and error handling are identical to a
 normal tool call. `already_done` (from `ToolContext.executed_tools`) suppresses any action the
 reply itself already took, so a message never gets reacted to twice.
+
+**Sensitive messages are a HARD RULE in the decision prompt, not per-action wording.** Measured:
+the model filed someone's bereavement away as a durable fact (2/3) and - worse - rewrote its
+own status and About Me off the back of a breakup. Per-action caveats didn't hold and blunted
+the useful cases (remembering a new job fell from 5/5 to 1/3). One standing rule covering every
+action fixed both: on anything touching a death, illness, mental health, a breakup, or money or
+family trouble, the only permitted action is a quiet reaction - never a stored fact, never a
+status/nickname/About Me. After that: reaction 3/3 and nothing else on all three sensitive
+scenarios, with remembering restored on the ordinary ones.
 
 **Keep examples in the decision prompt schematic.** `set_status` takes a type as well as text,
 so the model answers with an object - and a concrete sample (`{"text": "the kitchen",
