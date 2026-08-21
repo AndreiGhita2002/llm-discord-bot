@@ -170,6 +170,13 @@ Actions run through `tools.execute`, so permissions and error handling are ident
 normal tool call. `already_done` (from `ToolContext.executed_tools`) suppresses any action the
 reply itself already took, so a message never gets reacted to twice.
 
+**Keep examples in the decision prompt schematic.** `set_status` takes a type as well as text,
+so the model answers with an object - and a concrete sample (`{"text": "the kitchen",
+"activity": "watching"}`) was copied verbatim into unrelated conversations: music talk and
+cooking both produced "the kitchen". With a placeholder sample instead, the same model wrote
+"Listening to Taking On Me" and "baking spinach puffs". Any action declaring `fields` inherits
+this hazard.
+
 **The decision prompt must not ask for restraint.** It opened with "most of the time the answer
 is NONE of them", which suppressed the exact behaviour the pass exists to produce - 2/5 on a
 message that plainly deserved a reaction. Rarity is the knobs' job; the prompt's job is an
@@ -416,7 +423,7 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [ ] Run the evals against the DEPLOYED model: local baselines are `qwen3.5:9b` (94% guard on / 99% guard off) and `llama3.1:8b` (83%), neither of which is what ships. The laptop CANNOT run `qwen3.5:35b-a3b` - 23GB of weights against 18GB of RAM drove swap to 19GB. Run `uv run python evals/run_evals.py --runs 10` on the mini, with and without `--no-guard`.
 [x] Re-measured on the deployed model after num_ctx + tool descriptions + dedup: 89% -> 97% on action cases, 99% on negative/lookup (see the table above). NOTE the earlier model comparison (qwen3.5:9b scoring 81% on the mini) was run with the 4096 window and is void - its empty replies were overflow, not the model. If you want that comparison, redo it now.
 [x] Spontaneous expression: reactions, remember_fact, status, nickname and About Me now happen unprompted via `expression.py`. Prompt-based attempts failed at 10-20%; the separate post-reply pass measures 5/5 on messages that deserve a reaction and 0-1/5 on ones that don't.
-[ ] Live-verify the expression pass on the deployed bot: unit-tested and scenario-measured against qwen3.5:9b, but it has never run against real Discord. `set_about` in particular has never been called for real - it edits the bot's own application description via PATCH /applications/@me, which discord.py exposes as `AppInfo.edit(description=...)`. Watch for whether it needs any scope beyond the bot's own token.
+[ ] Live-verify the expression pass on the deployed bot: unit-tested and scenario-measured against qwen3.5:9b, but it has never run against real Discord. `set_about` and the non-"playing" activity types in particular have never been called for real - it edits the bot's own application description via PATCH /applications/@me, which discord.py exposes as `AppInfo.edit(description=...)`. Watch for whether it needs any scope beyond the bot's own token.
 [ ] `add_reaction` is the last weak tool at 9/10: the model announces the reaction in text ("I shall kronkify this moment right away! 🔥") or just types the emoji instead of calling it. Reactions are uniquely fakeable - no one can type a poll or a rename. Options if it becomes annoying: a claim rule for INTENT ("let me react", "I shall...") so the guard forces a correction round, or accept it as the least harmful miss.
 [ ] Over-eager web search: the model searches (and re-searches) opinion/chat questions it should just answer. On repeated searches it can burn through `max_tool_rounds` and return an empty reply, which users see as the 🥒 failsafe. Reproduced by the `music-chat-not-a-request` eval case on both qwen3.5:9b (1/3) and llama3.1:8b. Prompt already says to be tool-shy for casual chatter; needs a stronger rule, and possibly a guard against issuing the same search twice in one turn.
 [ ] Leaked tool calls: `llama3.1:8b` sometimes emits `{"name": "add_reaction", "parameters": {...}}` as message TEXT instead of a native tool call, so the user sees raw JSON and the action never happens. Caught by the evals but not guarded against - if qwen3.5 ever does this, detect a JSON tool-call blob in the reply and either execute it or suppress it.

@@ -223,6 +223,10 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
   frequency is enforced by `chance`/`cooldown` in config rather than requested in a prompt.
   Configure it under `expression:` — every action can be tuned or switched off.
 - **New `set_about` tool**: the bot can rewrite its own Discord "About Me" blurb.
+- **Every Discord activity type**: statuses are no longer stuck on "Playing". Kronk picks the
+  verb that fits — *Listening to Taking On Me*, *Watching the spinning top*, *Competing in* — or
+  `custom` for bare text with no verb at all, and he picks it himself as part of the same
+  spontaneous pass.
 - **Frequency-based evals**: cases can now assert how *often* a tool fires across runs
   (`expect.rate`), for behaviour that only exists in aggregate — one reaction is correct on any
   single run, and so is one silence; what's wrong is 0% or 100%. The report always prints the

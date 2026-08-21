@@ -382,13 +382,34 @@ async def _add_reaction(args: dict, ctx: ToolContext) -> str:
         return f"Could not react with '{emoji}': {e}"
 
 
+# The verb Discord renders in front of a status. "custom" renders the text alone, with no
+# prefix at all, which is the only way to say something that isn't shaped like an activity.
+_ACTIVITY_TYPES = {
+    "playing": (discord.ActivityType.playing, "Playing"),
+    "watching": (discord.ActivityType.watching, "Watching"),
+    "listening": (discord.ActivityType.listening, "Listening to"),
+    "competing": (discord.ActivityType.competing, "Competing in"),
+    "custom": (discord.ActivityType.custom, ""),
+}
+
+
 async def _set_status(args: dict, ctx: ToolContext) -> str:
     if ctx.client is None:
         return "No client available to set status."
     text = str(args["text"])[:128]
+    kind = str(args.get("activity", "playing")).strip().lower()
+    if kind not in _ACTIVITY_TYPES:
+        kind = "playing"  # an unknown verb is not worth failing the whole action over
+    activity_type, verb = _ACTIVITY_TYPES[kind]
     try:
-        await ctx.client.change_presence(activity=discord.Game(name=text))
-        return f"Status set to: Playing {text}"
+        if kind == "custom":
+            activity = discord.CustomActivity(name=text)
+        else:
+            activity = discord.Activity(type=activity_type, name=text)
+        await ctx.client.change_presence(activity=activity)
+        # verb is empty for "custom" (the text shows with no prefix), so join rather than
+        # interpolate - otherwise the result carries a double space.
+        return "Status set to: " + " ".join(part for part in (verb, text) if part)
     except Exception as e:
         return f"Could not set status: {e}"
 
@@ -594,9 +615,17 @@ _REGISTRY: list[Tool] = [
     ), _add_reaction, needs_discord=True),
     Tool("set_status", _fn(
         "set_status",
-        "Change your own 'Playing ...' status. Call this whenever someone asks you to set or "
-        "change your status. Describing the new status in your reply does nothing.",
-        {"text": {"type": "string", "description": "The status text."}}, ["text"],
+        "Change the status under your name. Pick the activity type that fits what you're "
+        "saying - watching/listening/competing read far better than playing for most things, "
+        "and 'custom' shows your text with no verb in front at all. Call this whenever someone "
+        "asks you to set or change your status. Describing it in your reply does nothing.",
+        {"text": {"type": "string",
+                  "description": "The status text, without the verb (e.g. 'the kitchen')."},
+         "activity": {"type": "string",
+                      "enum": ["playing", "watching", "listening", "competing", "custom"],
+                      "description": "How it reads: Playing X / Watching X / Listening to X / "
+                                     "Competing in X / or custom for the bare text."}},
+        ["text"],
     ), _set_status, needs_discord=True),
     Tool("set_nickname", _fn(
         "set_nickname",

@@ -55,6 +55,10 @@ class Action:
     tool: str                 # the registry tool it maps to
     arg: str                  # that tool's argument name
     prompt: str               # how the action is described to the deciding model
+    # Extra argument names this action accepts when the model answers with an object instead
+    # of a bare string, e.g. {"text": "the kitchen", "activity": "watching"}. Anything not
+    # listed here is dropped, so a hallucinated key can't reach the tool.
+    fields: tuple[str, ...] = ()
     scope: str = "global"     # "global" or "guild" - what a cooldown applies to
     enabled: bool = True
     chance: float = 1.0       # applied AFTER the model decides, to cap frequency
@@ -78,9 +82,16 @@ _DEFAULTS: list[Action] = [
            "passing. Skip opinions about whatever is being discussed right now.",
            chance=1.0, cooldown=0),
     Action("status", "set_status", "text",
-           "status: a new 'Playing ...' status for yourself, if the conversation has put you "
-           "in a mood or given you a daft idea worth wearing. Max 60 characters.",
-           chance=0.5, cooldown=1800),
+           # The example here MUST stay schematic. A concrete one ("the kitchen") was copied
+           # verbatim into unrelated conversations - the model lifted the sample text instead
+           # of writing its own, so music talk and cooking both produced "the kitchen".
+           "status: the line under your name, if the conversation has put you in a mood or "
+           "given you a daft idea worth wearing. Answer with an object of the form "
+           '{\"text\": \"<what you are up to, no verb>\", \"activity\": \"<type>\"}, '
+           "where type is one of playing, watching, listening, competing, or custom for bare "
+           "text with no verb in front. Pick the type that actually reads well, and write text "
+           "drawn from THIS conversation. Max 60 characters.",
+           fields=("activity",), chance=0.5, cooldown=1800),
     Action("nickname", "set_nickname", "nickname",
            "nickname: a new nickname for yourself in this server, if something in the "
            "conversation is funnier than your current one. Keep your identity recognisable. "
@@ -120,7 +131,7 @@ def configure(cfg: Optional[dict], model: str) -> list[str]:
             continue
         _actions[action.key] = Action(
             key=action.key, tool=action.tool, arg=action.arg, prompt=action.prompt,
-            scope=action.scope,
+            fields=action.fields, scope=action.scope,
             chance=float(settings.get("chance", action.chance)),
             cooldown=int(settings.get("cooldown", action.cooldown)),
         )
@@ -175,7 +186,7 @@ def _build_prompt(actions: list[Action], bot_name: str) -> str:
     )
 
 
-def _parse(content: str, actions: list[Action]) -> dict[str, str]:
+def _parse(content: str, actions: list[Action]) -> dict[str, dict]:
     """Pull the chosen actions out of the model's JSON, ignoring anything malformed."""
     try:
         data = json.loads(content)
@@ -188,13 +199,21 @@ def _parse(content: str, actions: list[Action]) -> dict[str, str]:
     chosen = {}
     for action in actions:
         value = data.get(action.key)
+        # An action with extra fields may come back as an object; take the main argument from
+        # it and keep only the extras it declared. Models also mix the two forms freely, so a
+        # bare string stays valid for those actions too.
+        extras = {}
+        if isinstance(value, dict) and action.fields:
+            extras = {k: str(v) for k, v in value.items()
+                      if k in action.fields and isinstance(v, (str, int, float))}
+            value = value.get(action.arg) or value.get("text") or value.get("value")
         # Models answer "none"/"null"/"" for "no thanks" as often as they omit the key.
         if not isinstance(value, str):
             continue
         value = value.strip()
         if not value or value.lower() in {"none", "null", "no", "n/a", "-"}:
             continue
-        chosen[action.key] = value
+        chosen[action.key] = {action.arg: value, **extras}
     return chosen
 
 
@@ -241,14 +260,14 @@ async def express(message, user_text: str, reply_text: str, ctx: ToolContext,
 
         performed = []
         by_key = {a.key: a for a in actions}
-        for key, value in chosen.items():
+        for key, args in chosen.items():
             action = by_key[key]
+            value = args[action.arg]
             # The frequency knob sits HERE, after the decision: the model judges whether the
             # moment deserves it, config decides how often that judgement is acted on.
             if action.chance < 1.0 and random.random() > action.chance:
                 log.info(f"Expression: skipping {action.tool} (chance {action.chance})")
                 continue
-            args = {action.arg: value}
             if action.tool == "remember_fact":
                 args["user_id"] = str(message.author.id)
             result = await tools.execute(action.tool, args, ctx)

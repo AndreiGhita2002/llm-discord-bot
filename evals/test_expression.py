@@ -113,6 +113,38 @@ async def malformed_output_does_nothing():
 
 
 @check
+async def an_action_can_carry_extra_fields():
+    """set_status needs a verb as well as text, so its answer may be an object."""
+    setup()
+    executed = await run_pass('{"status": {"text": "the kitchen", "activity": "watching"}}')
+    args = dict(executed)["set_status"]
+    assert args == {"text": "the kitchen", "activity": "watching"}, args
+
+
+@check
+async def a_bare_string_still_works_for_a_multi_field_action():
+    """Models mix the two forms freely; a plain string must stay valid."""
+    setup()
+    executed = await run_pass('{"status": "making spinach puffs"}')
+    assert dict(executed)["set_status"] == {"text": "making spinach puffs"}
+
+
+@check
+async def unknown_fields_are_dropped_before_reaching_the_tool():
+    setup()
+    executed = await run_pass(
+        '{"status": {"text": "the kitchen", "activity": "watching", "url": "http://x", "id": 7}}')
+    args = dict(executed)["set_status"]
+    assert args == {"text": "the kitchen", "activity": "watching"}, args
+
+
+@check
+async def an_object_for_an_action_without_fields_is_ignored():
+    setup()
+    assert await run_pass('{"reaction": {"emoji": "🔥"}}') == []
+
+
+@check
 async def chance_zero_blocks_an_action_the_model_chose():
     """The frequency knob is the whole reason this pass exists: config overrules the model."""
     setup(reaction={"chance": 0.0})
