@@ -30,10 +30,17 @@ def reply(content="", calls=()):
     return SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=tool_calls))
 
 
+# Tool executions from the most recent run_loop(), so a check can assert a repeated call was
+# served from cache rather than actually re-run. Module-level to keep run_loop's signature
+# unchanged for the checks that don't care.
+EXECUTED: list[str] = []
+
+
 async def run_loop(script, claim_check=True):
     """Drive query_ollama against a scripted model. Returns (final_reply, sent_conversations)."""
     seen: list[list[dict]] = []
     responses = list(script)
+    EXECUTED.clear()
 
     async def fake_chat(client, **kwargs):
         seen.append(list(kwargs["messages"]))
@@ -42,6 +49,7 @@ async def run_loop(script, claim_check=True):
         return responses.pop(0)
 
     async def fake_execute(name, args, ctx):
+        EXECUTED.append(name)
         return f"{name} ok"
 
     real_chat, real_execute, real_flag = main._model_chat, tools.execute, main.CLAIM_CHECK
@@ -124,6 +132,33 @@ async def guard_can_be_switched_off():
     final, seen = await run_loop([reply("Done! Reminder is set.")], claim_check=False)
     assert len(seen) == 1, f"claim_check=False still corrected: {len(seen)} calls"
     assert final == "Done! Reminder is set."
+
+
+@check
+async def an_identical_call_is_not_run_twice():
+    """The MAX_TOOL_ROUNDS spiral: a tool returns something unhelpful, so the model calls it
+    again with the same arguments until the rounds run out and the reply comes back empty."""
+    final, seen = await run_loop([
+        reply(calls=[("web_search", {"query": "f1 winner"})]),
+        reply(calls=[("web_search", {"query": "f1 winner"})]),   # identical - must not re-run
+        reply("Couldn't find out, sorry."),
+    ])
+    assert EXECUTED == ["web_search"], f"tool ran more than once: {EXECUTED}"
+    cached = [m for m in seen[-1]
+              if isinstance(m, dict) and "already called" in str(m.get("content", ""))]
+    assert cached, "the repeat call got no tool result at all - the model will just retry"
+    assert final == "Couldn't find out, sorry."
+
+
+@check
+async def differing_args_still_run():
+    """Dedup must key on the ARGUMENTS too - a second, different search is legitimate."""
+    final, seen = await run_loop([
+        reply(calls=[("web_search", {"query": "f1 winner"})]),
+        reply(calls=[("web_search", {"query": "f1 standings"})]),
+        reply("Verstappen won."),
+    ])
+    assert EXECUTED == ["web_search", "web_search"], f"second search was swallowed: {EXECUTED}"
 
 
 async def main_async() -> int:

@@ -331,10 +331,11 @@ async def _model_chat(client: ollama.AsyncClient, **kwargs):
     """
     # num_ctx must be set explicitly: Ollama defaults to 4096, which this prompt overflows.
     options = {"num_ctx": NUM_CTX, **kwargs.pop("options", {})}
+    think = kwargs.pop("think", MODEL_THINK)  # callers can force the reasoning pass off
 
     async def _call():
         try:
-            return await client.chat(think=MODEL_THINK, options=options, **kwargs)
+            return await client.chat(think=think, options=options, **kwargs)
         except (TypeError, ollama.ResponseError) as e:
             print(f"[WARN] 'think' param not accepted ({e}); retrying without it")
             return await client.chat(options=options, **kwargs)
@@ -366,6 +367,11 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
 
     executed_tools: list[str] = []  # what actually ran, for the claim check below
     corrected = False               # the claim check gets exactly one shot per turn
+    # Results of every distinct call made THIS TURN, keyed by (tool, args). Deduplication has
+    # to span rounds, not just sit inside one: when a tool returns something unhelpful ("web
+    # access isn't available") the model's instinct is to call it again, identically, until
+    # MAX_TOOL_ROUNDS runs out - which produced an empty reply and the 🥒 failsafe in the evals.
+    prior_results: dict[tuple[str, str], str] = {}
 
     for round_num in range(MAX_TOOL_ROUNDS):
         start_time = time.time()
@@ -411,15 +417,26 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
         conversation.append(response.message)
         print(f"[DEBUG] Tool calls: {[t.function.name for t in tool_calls]}")
 
-        seen_calls = set()  # Deduplicate identical calls within a round
         for tool_call in tool_calls:
             name = tool_call.function.name
             args = tool_call.function.arguments
             call_key = (name, str(args))
-            if call_key in seen_calls:
-                print(f"[DEBUG] Skipping duplicate: {name}")
+
+            # Repeat of a call already made this turn: hand back the SAME result with a note
+            # rather than re-running it. Answering with a tool message (instead of silently
+            # skipping) matters - a tool_call left without a matching result confuses the model
+            # into trying again, which is the loop this is here to break.
+            if call_key in prior_results:
+                log.warning(f"Model repeated an identical {name} call; returning cached result")
+                conversation.append({
+                    "role": "tool",
+                    "tool_name": name,
+                    "content": (f"You already called {name} with exactly these arguments this "
+                                f"turn. The result was:\n{prior_results[call_key]}\n"
+                                f"Do not call it again - answer the user with what you have, "
+                                f"or tell them you could not find out."),
+                })
                 continue
-            seen_calls.add(call_key)
 
             # Announce lookups so users know we're drawing from a real source.
             if ANNOUNCE_TOOLS and ctx is not None and ctx.message is not None:
@@ -439,16 +456,33 @@ async def query_ollama(messages: list[dict], memory_context: str = None,
                 log.warning(f"Tool {name} failed: {e}")
                 result = f"Tool error: {e}"
 
+            prior_results[call_key] = result
             conversation.append({
                 "role": "tool",
                 "tool_name": name,
                 "content": result,
             })
 
-    # Exhausted tool rounds - force a final answer with tools disabled.
+    # Exhausted tool rounds - force a final answer with tools disabled. `think=False` even when
+    # thinking is on globally: this call only has to summarise what the tools already returned,
+    # and a reasoning pass here produced a reply that was ENTIRELY reasoning, leaving empty
+    # content once it was stripped - the user then got the "not sure what to say" failsafe after
+    # five successful tool calls.
     log.warning(f"Hit MAX_TOOL_ROUNDS ({MAX_TOOL_ROUNDS}); forcing final answer")
-    response = await _model_chat(ollama_client, model=MODEL, messages=conversation)
-    return response.message.content
+    response = await _model_chat(ollama_client, model=MODEL, messages=conversation, think=False)
+    content = response.message.content or ""
+    if not strip_thinking(content).strip():
+        log.error("Forced final answer was empty; asking once more for a plain summary")
+        conversation.append({
+            "role": "system",
+            "content": ("Answer the user now, in plain text, using the tool results above. "
+                        "Do not call any more tools. If the tools did not give you what you "
+                        "needed, just say so in your own words."),
+        })
+        response = await _model_chat(ollama_client, model=MODEL, messages=conversation,
+                                     think=False)
+        content = response.message.content or ""
+    return content
 
 
 @client.event
