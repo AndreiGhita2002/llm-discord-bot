@@ -285,6 +285,29 @@ def _get_channel_lock(channel_id: int) -> asyncio.Lock:
         _channel_locks[channel_id] = lock
     return lock
 
+# Plain-text summons: "@kronk ..." counts as a mention even when it isn't a real Discord one.
+# The bot's own names are added per message in _is_text_summoned().
+SUMMON_NAMES = [str(n) for n in CONFIG.get("summon_names", []) if n]
+
+
+def _is_text_summoned(message: discord.Message) -> bool:
+    """Whether the message addresses the bot as plain text, e.g. "@kronk" or "@KRONK, hi".
+
+    People often type the name instead of picking the mention from Discord's autocomplete,
+    which leaves "@kronk" as ordinary text that the real-mention check can't see. Matches the
+    configured names plus the bot's username, display name and server nickname, so a nickname
+    the bot gave itself works too. The name must end at a word boundary - "@kronkfan" is
+    someone else.
+    """
+    names = set(SUMMON_NAMES)
+    names.update([client.user.name, client.user.display_name])
+    if message.guild is not None:
+        names.add(message.guild.me.display_name)
+    pattern = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True) if n)
+    return bool(pattern and re.search(rf"(?<!\w)@(?:{pattern})(?!\w)",
+                                      message.content or "", re.IGNORECASE))
+
+
 # Post a short "looking this up…" line to the channel before running a lookup tool.
 ANNOUNCE_TOOLS = CONFIG.get("announce_tools", True)
 
@@ -859,7 +882,7 @@ async def on_message(message: discord.Message):
         ref_msg = await message.channel.fetch_message(message.reference.message_id)
 
     # Only respond if mentioned or is responding to its message
-    is_mentioned = str(client.user.id) in message.content
+    is_mentioned = str(client.user.id) in message.content or _is_text_summoned(message)
     is_reply = ref_msg is not None and ref_msg.author == client.user
     if not is_mentioned and not is_reply:
         return

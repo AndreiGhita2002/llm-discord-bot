@@ -135,6 +135,10 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 
 `!help` lists these plus every other command the bot knows.
 
+Once the bot is in a voice channel, anyone can queue to it - including people who aren't in
+voice at all. Someone sitting in a *different* voice channel is asked to come join instead of
+the bot being pulled away from its listeners.
+
 **Config** (`voice:` block — see `kronk_config.yaml` for all options and Kronk-voiced message
 templates):
 
@@ -205,12 +209,22 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ## Usage
 
-- **@mention** the bot to get a response
+- **@mention** the bot to get a response - typing `@kronk` as plain text works too
+  (case-insensitive; names configurable via `summon_names`)
 - **Reply** to any of the bot's messages to continue the conversation
 - **`!play <song>`** to have the bot play YouTube audio in your voice channel (see above)
 - **`!help`** to list every command
 
 ## Changelog
+
+### v0.2.8
+
+- **Queue from anywhere**: once Kronk is in a voice channel, anyone can queue music to it
+  (`!play` or asking him) without being in voice themselves. If you're in a different voice
+  channel he tells you to come over rather than leaving his current listeners.
+- **Text summons**: typing `@kronk` (any case) gets his attention just like a real Discord
+  mention - no need to pick him from the autocomplete. His username, display name and server
+  nickname work too, plus anything in `summon_names`.
 
 ### v0.2.7
 

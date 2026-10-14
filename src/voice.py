@@ -5,7 +5,7 @@ Commands are plain text messages matched by regex, NOT Discord's slash-command A
 runs on a bare `discord.Client`). They're prefixed with `!` rather than `/` so typing one
 doesn't trigger Discord's native slash-command autocomplete popup:
 
-    !play <search terms | url>   join the caller's voice channel and play (or queue) it
+    !play <search terms | url>   play (or queue) it - in the bot's channel, else the caller's
     !skip                        skip the current track
     !stop                        clear the queue and stop playing (stay connected)
     !leave                       stop and disconnect
@@ -139,6 +139,9 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
     "not_in_voice": [
         "You need to be in a voice channel first.",
     ],
+    "wrong_voice_channel": [
+        "I'm already playing in {channel} — come join me there to queue music.",
+    ],
     "nothing_playing": [
         "I'm not playing anything right now.",
     ],
@@ -250,7 +253,8 @@ def unavailable_reason() -> Optional[str]:
 # two can't drift apart. main.py renders it; see the "standardise the command set" TODO for the
 # eventual shared dispatcher.
 COMMAND_HELP: list[tuple[str, str]] = [
-    ("!play <song or url>", "Join your voice channel and play the top YouTube result"),
+    ("!play <song or url>", "Play the top YouTube result - in my voice channel if I'm in one, "
+                            "otherwise I join yours"),
     ("!skip", "Skip the current track"),
     ("!stop", "Stop playing and clear the queue"),
     ("!leave", "Stop and leave the voice channel"),
@@ -772,6 +776,31 @@ class PlayResult:
     position: int = 0
 
 
+def _bot_voice_channel(guild: Optional[discord.Guild]) -> Optional[discord.VoiceChannel]:
+    vc = guild.voice_client if guild else None
+    return vc.channel if vc and vc.is_connected() else None
+
+
+def _target_channel(message: discord.Message) -> tuple[Optional[discord.VoiceChannel], Optional[str]]:
+    """The voice channel a play request should go to, or the error line explaining why not.
+
+    Once the bot is in a voice channel, that's where music goes - the requester doesn't have
+    to be in voice at all, so someone can queue a song from text chat for the people already
+    listening. Only when the bot isn't connected yet does the requester's own channel decide
+    where it joins. Someone sitting in a DIFFERENT channel is told to come over, rather than
+    the bot being dragged away from the people already listening.
+    """
+    bot_channel = _bot_voice_channel(message.guild)
+    author_channel = _author_voice_channel(message)
+    if bot_channel is not None:
+        if author_channel is not None and author_channel.id != bot_channel.id:
+            return None, _say("wrong_voice_channel", channel=bot_channel.name)
+        return bot_channel, None
+    if author_channel is None:
+        return None, _say("not_in_voice")
+    return author_channel, None
+
+
 def play_precheck(message: discord.Message) -> Optional[str]:
     """Cheap checks to run before spending a yt-dlp lookup. Returns an error line, or None."""
     reason = _unavailable_reason()
@@ -779,8 +808,9 @@ def play_precheck(message: discord.Message) -> Optional[str]:
         return _say("unavailable", reason=reason)
     if message.guild is None:
         return "That only works in a server."
-    if _author_voice_channel(message) is None:
-        return _say("not_in_voice")
+    _, error = _target_channel(message)
+    if error:
+        return error
     if len(_player_for(message.guild).queue) >= MAX_QUEUE:
         return _say("queue_full", limit=MAX_QUEUE)
     return None
@@ -788,7 +818,7 @@ def play_precheck(message: discord.Message) -> Optional[str]:
 
 async def enqueue_request(message: discord.Message, query: str,
                           source: str = "command") -> PlayResult:
-    """Resolve `query`, join the requester's voice channel and queue it.
+    """Resolve `query`, join the target voice channel (see `_target_channel`) and queue it.
 
     This is the ONE path used by both `!play` and the LLM's queue_song tool, so the two can't
     drift apart on the things that matter: duration limits, the queue cap, channel permissions
@@ -810,11 +840,11 @@ async def enqueue_request(message: discord.Message, query: str,
             f"[{source}] request rejected before lookup: {error!r} "
             f"(author={author}, voice_state={'present' if state else 'None'}, "
             f"channel={getattr(getattr(state, 'channel', None), 'id', None)}, "
+            f"bot_channel={getattr(_bot_voice_channel(message.guild), 'id', None)}, "
             f"guild={guild_id})"
         )
         return PlayResult(False, error)
 
-    channel = _author_voice_channel(message)
     player = _player_for(message.guild)
     player.text_channel = message.channel
 
@@ -843,6 +873,14 @@ async def enqueue_request(message: discord.Message, query: str,
             limit=_format_duration(limit_seconds),
             title=track.title,
         ))
+
+    # Decided only now, after the lookup: the bot may have idled out of (or been moved
+    # between) channels while yt-dlp was busy, which changes where this request can go.
+    channel, error = _target_channel(message)
+    if error:
+        log.warning(f"[{source}] request rejected after lookup: {error!r} "
+                    f"(author={author}, guild={guild_id})")
+        return PlayResult(False, error)
 
     already_in = player.is_active()
     log.info(f"[{source}] {'already connected' if already_in else 'joining'} voice channel "

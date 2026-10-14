@@ -267,11 +267,11 @@ async def _set_reminder(args: dict, ctx: ToolContext) -> str:
 
 
 async def _queue_song(args: dict, ctx: ToolContext) -> str:
-    """Queue a song in the voice channel the requester is sitting in.
+    """Queue a song in the bot's current voice channel, or else the requester's.
 
     Delegates to voice.enqueue_request, the same path `!play` uses, so the model can't bypass
-    the duration limit, queue cap or permission checks. The user must already be in a voice
-    channel - the bot never picks one on its own.
+    the duration limit, queue cap or permission checks. The bot never picks a channel on its
+    own: it plays where it already is, or joins the one the requester is sitting in.
     """
     if ctx.message is None:
         return "Queueing music needs an active channel context."
@@ -574,9 +574,9 @@ _REGISTRY: list[Tool] = [
     ), _set_reminder, needs_discord=True),
     Tool("queue_song", _fn(
         "queue_song",
-        "Play or queue a song in the voice channel the user is currently sitting in. Use this "
-        "whenever someone asks you to play, put on, or queue music. The user must already be in "
-        "a voice channel. Accepts a song name, an artist, or a YouTube URL.",
+        "Play or queue a song in your current voice channel, or the user's if you aren't in "
+        "one. Use this whenever someone asks you to play, put on, or queue music. Accepts a "
+        "song name, an artist, or a YouTube URL.",
         {"query": {"type": "string",
                    "description": "Song/artist to search for, or a YouTube URL."}}, ["query"],
     ), _queue_song, needs_discord=True, needs_voice=True),
