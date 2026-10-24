@@ -14,8 +14,10 @@ dependencies = [
     "sqlite-vec>=0.1.0",
     # Voice playback (/play): PyNaCl encrypts the voice stream, yt-dlp resolves YouTube audio.
     # The ffmpeg binary and libopus are system deps (macOS: `brew install ffmpeg`).
-    "PyNaCl>=1.5.0",
-    "yt-dlp>=2024.8.6",
+    # Floors are security fixes: PyNaCl 1.6.2 bundles the libsodium fix for CVE-2025-69277;
+    # yt-dlp 2026.7.4 fixes CVE-2026-55404 (and the earlier 2026 netrc/aria2c/link-file CVEs).
+    "PyNaCl>=1.6.2",
+    "yt-dlp>=2026.7.4",
     # DAVE (Discord's end-to-end voice encryption). MANDATORY for voice since Discord enforced
     # it on 2026-03-02: without it discord.py advertises max_dave_protocol_version 0 and the
     # voice gateway rejects the connection with close code 4017. discord.py implements DAVE but

@@ -229,6 +229,9 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 - **Stream retries**: if a track's stream fails - no audio at all, or it drops partway through -
   Kronk quietly retries it with a fresh link (`voice.stream_retries`, default 2), picking up
   where it stopped, before giving up and saying so.
+- **Dependencies updated** (yt-dlp 2026.10.21, ollama 0.6.3, davey 0.1.7, aiohttp 3.14.5 and
+  other transitive bumps). The yt-dlp and PyNaCl minimums now require their security-fixed
+  releases. `pip-audit` reports no known vulnerabilities.
 
 ### v0.2.8
 

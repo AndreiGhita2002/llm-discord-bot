@@ -1,5 +1,4 @@
 # Dependencies
-uv.lock
 .venv/
 venv/
 
