@@ -101,7 +101,7 @@ def _no_web_key() -> Optional[str]:
 
 
 async def _web_search(args: dict, ctx: ToolContext) -> str:
-    if (msg := _no_web_key()):
+    if msg := _no_web_key():
         return msg
     query = args["query"]
     print(f"[TOOL] web_search: {query}")
@@ -113,7 +113,7 @@ async def _web_search(args: dict, ctx: ToolContext) -> str:
 
 
 async def _web_fetch(args: dict, ctx: ToolContext) -> str:
-    if (msg := _no_web_key()):
+    if msg := _no_web_key():
         return msg
     url = args["url"]
     if not url.startswith(("http://", "https://")):
@@ -576,9 +576,10 @@ _REGISTRY: list[Tool] = [
         "queue_song",
         "Play or queue a song in your current voice channel, or the user's if you aren't in "
         "one. Use this whenever someone asks you to play, put on, or queue music. Accepts a "
-        "song name, an artist, or a YouTube URL.",
+        "song name, an artist, or a YouTube URL - a playlist URL queues the whole playlist.",
         {"query": {"type": "string",
-                   "description": "Song/artist to search for, or a YouTube URL."}}, ["query"],
+                   "description": "Song/artist to search for, or a YouTube video/playlist URL."}},
+        ["query"],
     ), _queue_song, needs_discord=True, needs_voice=True),
 
     # --- knowledge / utility ---

@@ -126,6 +126,8 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 | --- | --- |
 | `!play <search terms>` | Joins your voice channel and plays the top YouTube result |
 | `!play <url>` | Same, but for a direct link |
+| `!play <playlist url>` | Queues the whole playlist (from the linked video, if the link has one) |
+| `!p ...` | Short for `!play` |
 | `!skip` | Skip the current track |
 | `!stop` | Stop and clear the queue (stays connected) |
 | `!leave` | Stop and disconnect |
@@ -216,6 +218,17 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 - **`!help`** to list every command
 
 ## Changelog
+
+### v0.2.9
+
+- **`!p`** works as a shortcut for `!play`.
+- **Playlists**: `!play <playlist link>` (or asking Kronk with one) queues the whole playlist, as
+  far as the queue has room (`voice.max_queue`). A `watch?v=…&list=…` link starts from the video
+  it points at. Playlist tracks are looked up when they come up to play, so even a long playlist
+  queues in a couple of seconds.
+- **Stream retries**: if a track's stream fails - no audio at all, or it drops partway through -
+  Kronk quietly retries it with a fresh link (`voice.stream_retries`, default 2), picking up
+  where it stopped, before giving up and saying so.
 
 ### v0.2.8
 

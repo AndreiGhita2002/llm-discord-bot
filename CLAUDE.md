@@ -360,6 +360,8 @@ These are **text commands matched by regex**, not Discord's slash-command API - 
 `CommandTree`). `voice.handle_command(message)` is called early in `on_message`, before any LLM
 handling, and returns True when it consumed the message.
 
+`!p` is an alias for `!play` (it sits in `_CMD_RE`; `\b` keeps `!pause`/`!ping` from matching it).
+
 **How it plays**: audio is streamed, never downloaded. `yt-dlp` resolves a direct media URL
 (`ytsearch1:<phrase>` for a search, the URL as-is for a link) and `discord.FFmpegPCMAudio` pipes
 it into the voice channel. yt-dlp does blocking network I/O, so every resolve goes through
@@ -375,6 +377,30 @@ join and immediately leave.
 
 Queued tracks re-resolve their media URL if it's older than `STREAM_URL_TTL` (30 min), because
 YouTube's direct URLs expire.
+
+**Playlists**: any URL with a `list=` parameter goes through `resolve_request()`'s playlist path,
+which lists entries with yt-dlp's `extract_flat="in_playlist"` (one request: ids, titles,
+durations) and queues them as *lazy* tracks - empty `stream_url`, `resolved_at=0` - so
+`_refresh_stream_url()` resolves each one when it reaches the front of the queue. Resolving
+every entry up front would take seconds per track and blow `RESOLVE_TIMEOUT`. yt-dlp returns a
+`watch?v=X&list=Y` playlist from the top, so the code skips ahead to X itself. Flat durations can
+be off by a second from the full resolve (235 vs 234), and missing for some entries, so the
+duration limit is applied at enqueue time AND again in `_play()` once the real value is known.
+Playlists fill the queue up to `max_queue` and report what was left out. On the tool path only
+the FIRST track is `suppress_announce`d (it's the one named in the reply); the rest announce
+normally.
+
+**Stream retries** (`voice.stream_retries`, default 2): `_play()` is a retry loop around
+`_stream_once()`. An attempt fails if no audio came out (the 403 case below), audio stopped more
+than `EARLY_END_SLACK` (10s) short of the known duration, or discord.py reported an error. Each
+retry force-refreshes the media URL and resumes with `ffmpeg -ss <position>`. The position comes
+from `_MeteredVolume`, which counts the 20ms frames actually handed to Discord - wall-clock time
+would include pauses. Resolve errors in `_PERMANENT_ERROR_KINDS` (private, age-gated,
+bot-check) aren't retried. A resume that produces no audio AND no stderr means YouTube's stated
+duration was longer than the actual audio, so it counts as a normal end, not a failure.
+Livestreams retry without `-ss`. Retries log at WARNING; only giving up posts in chat. A
+`!skip`/`!stop` during a backoff or a resolve is honoured: `_skip_requested` is reset once per
+track, not per attempt.
 
 **Exactly one announcement per track**. Two things can announce a track and they must never
 both fire: the player loop's `now_playing` post, and the `🎶 Now playing: <title> <url>` line
@@ -489,7 +515,9 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [x] Silent playback failure (bot joined, announced, instantly skipped, no audio, no error): yt-dlp's default `ANDROID_VR` client hands out media URLs that ffmpeg gets a 403 on. Fixed with `voice.player_clients: ["android"]` + real failure detection in `_play()`. See the player-client note in the Voice Playback section.
 [ ] Live-verify voice playback on the deployed bot: after the `davey` and player-client fixes, confirm audio actually reaches a voice channel. Unit + mock-integration tested (queue order, skip, stop, idle disconnect, all `!play` gating paths) and yt-dlp search/stream-URL resolution verified against real YouTube, but no audio has been pushed to a real voice channel yet. Needs the Connect/Speak permissions.
 [ ] Standardise the command set: `voice.py` uses `!play`/`!skip`/… but `discord_logging.py` still uses `/setlogchannel` and `/clearlogchannel`, so the bot answers to two different prefixes (`!help` lists both, but it reads as an inconsistency). Settle on one (`!` avoids colliding with Discord's slash-command autocomplete popup) and move the log commands over. Each module still matches its own regex with `on_message` calling them in sequence - worth factoring into one shared dispatcher (name -> handler + help text) so adding a command is a single entry, the way `tools.py` does it. `COMMAND_HELP` is the first step of that: the help text already lives next to each module's regexes.
-[ ] Song queue improvements: the basics are already in (`GuildPlayer.queue`, in-order playback, `!queue`, `!skip`, `max_queue` cap). Missing: playlist/album URLs (`noplaylist: True` currently takes only the first video of a link), shuffle and loop/repeat modes, removing or reordering entries (`!remove <n>`, `!move <from> <to>`), paging for long queues (`!queue` truncates at 10 with no way to see the rest), a "up next" hint when a track ends, and persisting the queue across restarts the way reminders are persisted.
+[x] Playlist URLs queue the whole playlist (lazily resolved), `!p` alias, and failed streams are retried with resume - see the Voice Playback section. Live-verify the mid-song resume (`-ss` on a real YouTube stream) on the deployed bot; it's only been tested against a fake voice client.
+[ ] `max_queue` (default 20) also caps playlists, so a 50-track playlist queues 20. Consider a higher default now that playlists exist.
+[ ] Song queue improvements: the basics are already in (`GuildPlayer.queue`, in-order playback, `!queue`, `!skip`, `max_queue` cap, playlists). Missing: shuffle and loop/repeat modes, removing or reordering entries (`!remove <n>`, `!move <from> <to>`), paging for long queues (`!queue` truncates at 10 with no way to see the rest), a "up next" hint when a track ends, and persisting the queue across restarts the way reminders are persisted.
 [x] Expose music to the LLM: the `queue_song` tool lets the model queue tracks ("kronk, put on some jazz"). It routes through `voice.enqueue_request()`, the same path `!play` uses, so the model can't bypass the duration limit, queue cap or permission checks, and it only ever plays in the channel it's already in or joins the *requester's* current one - never one of its own choosing. Gated off entirely when voice playback isn't available.
 [ ] DEPLOY HAZARD (src/ move): `run-bot.sh` is generated by setup-daemon-mac.sh and gitignored, so the host's copy still launches `uv run python main.py`. Deploying the src/ restructure without re-running `./setup-daemon-mac.sh` on the host leaves the runner unable to start the bot (and restart-looping). Re-run the setup script on the host as part of this deploy.
 [ ] Log channel feature: the user can set a channel for bot logs, and the bot will announce when it's turning on or off.

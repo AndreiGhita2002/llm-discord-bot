@@ -258,6 +258,9 @@ voice:
   # default (ANDROID_VR) is one of the broken ones. If playback breaks after a YouTube change,
   # try: android, ios, tv, web_safari, mweb, web.
   player_clients: ["android"]
+  # A track whose stream fails (no audio, or it drops mid-song) is retried this many times with a
+  # fresh media URL, resuming where it stopped, before the bot gives up on it. 0 = no retries.
+  stream_retries: 2
   # Leave as soon as the last human leaves the voice channel.
   leave_when_alone: true
 

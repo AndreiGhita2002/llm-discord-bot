@@ -6,6 +6,7 @@ runs on a bare `discord.Client`). They're prefixed with `!` rather than `/` so t
 doesn't trigger Discord's native slash-command autocomplete popup:
 
     !play <search terms | url>   play (or queue) it - in the bot's channel, else the caller's
+                                 (`!p` for short; a playlist link queues the whole playlist)
     !skip                        skip the current track
     !stop                        clear the queue and stop playing (stay connected)
     !leave                       stop and disconnect
@@ -84,6 +85,15 @@ MIN_PLAYBACK_SECONDS = 1.5
 # Ceiling on the voice handshake. Matters most on the LLM tool path: a hanging connect there
 # stalls the whole agentic loop and burns the model's request timeout instead of failing fast.
 CONNECT_TIMEOUT = 30.0
+# How many times a track that fails to stream is retried (fresh media URL each time, resuming
+# from where it dropped) before it is given up on. See _play().
+STREAM_RETRIES = 2
+RETRY_BACKOFF = 1.5                  # seconds; attempt n waits n * this before retrying
+# A track whose audio stops more than this many seconds short of its known duration didn't
+# finish - the stream dropped. YouTube durations are whole seconds, so some slack is needed.
+EARLY_END_SLACK = 10.0
+# yt-dlp failure kinds (classify_youtube_error) that a retry can't fix.
+_PERMANENT_ERROR_KINDS = frozenset({"unavailable", "age-gated", "bot-check"})
 
 # ffmpeg flags: -vn drops video; the reconnect flags let it recover from a dropped HTTP
 # stream mid-song instead of ending the track early.
@@ -94,7 +104,7 @@ FFMPEG_OPTIONS = "-vn -loglevel warning"
 
 _YDL_BASE_OPTS = {
     "format": "bestaudio/best",
-    "noplaylist": True,       # a link with &list=... plays the one video, not the playlist
+    "noplaylist": True,       # overridden for playlist links - see _blocking_resolve_request
     "quiet": True,
     "no_warnings": True,
     "ignoreerrors": False,
@@ -154,6 +164,14 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
     "queue_full": [
         "The queue is full ({limit} tracks). Let some play out first.",
     ],
+    # {count} tracks queued from playlist {playlist}; {skipped} is a ready-made note (or empty)
+    # about tracks left out because the queue filled up or they were too long.
+    "playlist_queued": [
+        "📜 Queued **{count}** tracks from **{playlist}**.{skipped}",
+    ],
+    "playlist_empty": [
+        "I couldn't find anything playable in **{playlist}**.",
+    ],
     "unavailable": [
         "I can't play audio right now: {reason}",
     ],
@@ -194,7 +212,7 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     """
     global ENABLED, FFMPEG_PATH, OPUS_PATH, COOKIES_FILE, VOLUME, MAX_DURATION_MINUTES
     global MAX_QUEUE, IDLE_TIMEOUT, RESOLVE_TIMEOUT, LEAVE_WHEN_ALONE, _messages
-    global PLAYER_CLIENTS
+    global PLAYER_CLIENTS, STREAM_RETRIES
 
     cfg = cfg or {}
     ENABLED = bool(cfg.get("enabled", True))
@@ -208,6 +226,7 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     RESOLVE_TIMEOUT = int(cfg.get("resolve_timeout", 60))
     PLAYER_CLIENTS = list(cfg.get("player_clients") or ["android"])
     LEAVE_WHEN_ALONE = bool(cfg.get("leave_when_alone", True))
+    STREAM_RETRIES = max(0, int(cfg.get("stream_retries", 2)))
 
     merged = {k: list(v) for k, v in DEFAULT_MESSAGES.items()}
     for key, templates in (cfg.get("messages") or {}).items():
@@ -254,7 +273,8 @@ def unavailable_reason() -> Optional[str]:
 # eventual shared dispatcher.
 COMMAND_HELP: list[tuple[str, str]] = [
     ("!play <song or url>", "Play the top YouTube result - in my voice channel if I'm in one, "
-                            "otherwise I join yours"),
+                            "otherwise I join yours. A playlist link queues the whole playlist. "
+                            "`!p` works too"),
     ("!skip", "Skip the current track"),
     ("!stop", "Stop playing and clear the queue"),
     ("!leave", "Stop and leave the voice channel"),
@@ -315,7 +335,23 @@ def _format_duration(seconds: Optional[int]) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def _too_long(duration: Optional[int]) -> bool:
+    """Over the configured max_duration_minutes (unknown/live durations never are)."""
+    limit_seconds = MAX_DURATION_MINUTES * 60
+    return bool(limit_seconds and duration and duration > limit_seconds)
+
+
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+
+
+def _ydl_opts(**overrides) -> dict:
+    opts = dict(_YDL_BASE_OPTS)
+    if COOKIES_FILE:
+        opts["cookiefile"] = COOKIES_FILE
+    if PLAYER_CLIENTS:
+        opts["extractor_args"] = {"youtube": {"player_client": list(PLAYER_CLIENTS)}}
+    opts.update(overrides)
+    return opts
 
 
 def _blocking_resolve(target: str) -> dict:
@@ -325,14 +361,8 @@ def _blocking_resolve(target: str) -> dict:
     query so the top YouTube hit is used; anything starting with http(s) is passed straight
     through (so direct links, and any other site yt-dlp supports, work too).
     """
-    opts = dict(_YDL_BASE_OPTS)
-    if COOKIES_FILE:
-        opts["cookiefile"] = COOKIES_FILE
-    if PLAYER_CLIENTS:
-        opts["extractor_args"] = {"youtube": {"player_client": list(PLAYER_CLIENTS)}}
-
     query = target if _URL_RE.match(target) else f"ytsearch1:{target}"
-    with yt_dlp.YoutubeDL(opts) as ydl:
+    with yt_dlp.YoutubeDL(_ydl_opts()) as ydl:
         info = ydl.extract_info(query, download=False)
 
     if not info:
@@ -396,11 +426,7 @@ def classify_youtube_error(exc: Exception) -> tuple[str, str]:
     return "unexpected", "YouTube gave me an answer I didn't understand"
 
 
-async def resolve_track(target: str, requested_by: str = "") -> Track:
-    """Resolve a search phrase or URL into a playable Track (off the event loop, bounded)."""
-    info = await asyncio.wait_for(
-        asyncio.to_thread(_blocking_resolve, target), timeout=RESOLVE_TIMEOUT
-    )
+def _track_from(info: dict, target: str, requested_by: str) -> Track:
     return Track(
         title=info.get("title") or "Unknown title",
         webpage_url=info.get("webpage_url") or info.get("original_url") or target,
@@ -411,19 +437,112 @@ async def resolve_track(target: str, requested_by: str = "") -> Track:
     )
 
 
-async def _refresh_stream_url(track: Track) -> None:
+async def resolve_track(target: str, requested_by: str = "") -> Track:
+    """Resolve a search phrase or URL into a playable Track (off the event loop, bounded)."""
+    info = await asyncio.wait_for(
+        asyncio.to_thread(_blocking_resolve, target), timeout=RESOLVE_TIMEOUT
+    )
+    return _track_from(info, target, requested_by)
+
+
+# Any link carrying a `list=` parameter is treated as a playlist - including a `watch?v=X&list=Y`
+# link, which is what YouTube hands out when you share from inside a playlist. Playback then
+# starts at the linked video rather than at the top of the list.
+_PLAYLIST_RE = re.compile(r"[?&]list=([\w-]+)")
+_VIDEO_ID_RE = re.compile(r"[?&]v=([\w-]+)")
+# Flat playlist extraction lists removed videos under placeholder titles instead of dropping them.
+_DEAD_ENTRY_TITLES = {"[private video]", "[deleted video]", "[unavailable video]"}
+
+
+def is_playlist_link(target: str) -> bool:
+    return bool(_URL_RE.match(target) and _PLAYLIST_RE.search(target))
+
+
+def _blocking_resolve_playlist(url: str) -> dict:
+    """List a playlist's entries WITHOUT resolving each one (BLOCKING - use asyncio.to_thread).
+
+    `extract_flat` returns ids, titles and durations in one request; resolving every entry's
+    media URL up front would take seconds per track, blow RESOLVE_TIMEOUT on any real playlist,
+    and the URLs would expire before most of them played anyway. Each track's media URL is
+    resolved when it reaches the front of the queue instead (see _refresh_stream_url).
+    """
+    with yt_dlp.YoutubeDL(_ydl_opts(noplaylist=False, extract_flat="in_playlist")) as ydl:
+        info = ydl.extract_info(url, download=False)
+    if not info:
+        raise LookupError("no results")
+    return info
+
+
+def _lazy_track(entry: dict, requested_by: str) -> Optional[Track]:
+    """A queued-but-unresolved Track from a flat playlist entry, or None if it can't play."""
+    title = entry.get("title") or ""
+    if title.lower() in _DEAD_ENTRY_TITLES:
+        return None
+    url = entry.get("webpage_url") or entry.get("url")
+    if not url and entry.get("id") and entry.get("ie_key") == "Youtube":
+        url = f"https://www.youtube.com/watch?v={entry['id']}"
+    if not url:
+        return None
+    return Track(
+        title=title or "Unknown title",
+        webpage_url=url,
+        duration=entry.get("duration"),
+        stream_url="",
+        uploader=entry.get("uploader") or entry.get("channel") or "",
+        requested_by=requested_by,
+        resolved_at=0.0,   # forces a resolve when it reaches the front of the queue
+    )
+
+
+@dataclass
+class Resolved:
+    """What a play request turned into: one track, or a playlist's worth."""
+    tracks: list[Track]
+    playlist: Optional[str] = None   # the playlist's title; None for a single track
+    dead: int = 0                    # playlist entries dropped as private/deleted
+
+
+async def resolve_request(target: str, requested_by: str = "") -> Resolved:
+    """Resolve a play request: a search phrase, a video link, or a playlist link."""
+    if not is_playlist_link(target):
+        return Resolved([await resolve_track(target, requested_by)])
+
+    info = await asyncio.wait_for(
+        asyncio.to_thread(_blocking_resolve_playlist, target), timeout=RESOLVE_TIMEOUT
+    )
+    if "entries" not in info:   # the extractor decided it's a single video after all
+        return Resolved([_track_from(info, target, requested_by)])
+
+    entries = [e for e in (info.get("entries") or []) if e]
+    playable = [(e, t) for e, t in ((e, _lazy_track(e, requested_by)) for e in entries) if t]
+    # A watch?v=X&list=Y link means "play this playlist from X", but yt-dlp returns it from
+    # the top; skip ahead to the linked video when it's in there.
+    video = _VIDEO_ID_RE.search(target)
+    start = next((i for i, (e, _) in enumerate(playable)
+                  if video and e.get("id") == video.group(1)), 0)
+    return Resolved([t for _, t in playable[start:]],
+                    playlist=info.get("title") or "that playlist",
+                    dead=len(entries) - len(playable))
+
+
+async def _refresh_stream_url(track: Track, force: bool = False) -> None:
     """Re-resolve a track's media URL if it's gone stale sitting in the queue.
 
     YouTube's direct URLs are time-limited, so a track queued behind a long set could have an
-    expired link by the time it plays.
+    expired link by the time it plays. Playlist tracks are queued with no URL at all and are
+    resolved here for the first time. `force` re-resolves regardless (a retry after a failed
+    stream, where the URL itself is the prime suspect).
     """
-    if time.time() - track.resolved_at < STREAM_URL_TTL:
+    if not force and track.stream_url and time.time() - track.resolved_at < STREAM_URL_TTL:
         return
     info = await asyncio.wait_for(
         asyncio.to_thread(_blocking_resolve, track.webpage_url), timeout=RESOLVE_TIMEOUT
     )
     track.stream_url = _stream_url_from(info)
     track.resolved_at = time.time()
+    # Flat playlist entries can be missing these; the full resolve has them.
+    track.duration = info.get("duration") or track.duration
+    track.uploader = track.uploader or info.get("uploader") or ""
 
 
 # === Per-guild player ===
@@ -564,31 +683,87 @@ class GuildPlayer:
         await self.disconnect()
 
     async def _play(self, track: Track) -> None:
-        """Stream one track to completion (or until skipped)."""
-        try:
-            await _refresh_stream_url(track)
-        except Exception as e:
-            kind, hint = classify_youtube_error(e)
-            log.error(f"Could not refresh the stream URL for {track.title!r} [{kind}]: "
-                      f"{type(e).__name__}: {str(e)[:300]}")
-            await self._announce(_say("playback_failed", title=track.title, error=hint))
-            return
-        vc = self.voice
-        if vc is None or not vc.is_connected():
-            log.warning(f"Voice client gone before {track.title!r} could start; dropping it")
-            return
+        """Stream one track to completion (or until skipped), retrying a stream that fails.
 
+        A failed stream - no audio at all, or audio that stops short of the track's length - is
+        retried up to STREAM_RETRIES times. Each retry fetches a FRESH media URL (an expired or
+        client-mismatched URL is the usual culprit) and resumes where the audio stopped, so a
+        drop mid-song costs a few seconds rather than the song. Retries are logged at WARNING,
+        not posted in chat; only giving up is. A !skip/!stop/!leave during a retry ends it.
+        """
+        self._skip_requested = False
+        position = 0.0       # seconds of this track already played, summed over attempts
+        announced = False
+        failure = ""
+        attempts = STREAM_RETRIES + 1
+        for attempt in range(attempts):
+            if attempt:
+                log.warning(f"Retrying {track.title!r} (attempt {attempt + 1}/{attempts}) from "
+                            f"{_format_duration(int(position)) if position else 'the start'} "
+                            f"after: {failure}")
+                await asyncio.sleep(RETRY_BACKOFF * attempt)
+                if self._skip_requested:
+                    return
+
+            try:
+                await _refresh_stream_url(track, force=attempt > 0)
+            except Exception as e:
+                if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
+                    kind, failure = "timeout", f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s)"
+                else:
+                    kind, failure = classify_youtube_error(e)
+                log.warning(f"Could not resolve the stream URL for {track.title!r} [{kind}]: "
+                            f"{type(e).__name__}: {str(e)[:300]}")
+                if kind in _PERMANENT_ERROR_KINDS:
+                    break
+                continue
+            if self._skip_requested:   # skipped while the URL was resolving
+                return
+            # Playlist tracks were queued before their length was known for sure.
+            if _too_long(track.duration):
+                log.info(f"Skipping {track.title!r}: {_format_duration(track.duration)} is over "
+                         f"the {MAX_DURATION_MINUTES}-minute limit")
+                await self._announce(_say("too_long", title=track.title,
+                                          duration=_format_duration(track.duration),
+                                          limit=_format_duration(MAX_DURATION_MINUTES * 60)))
+                return
+
+            vc = self.voice
+            if vc is None or not vc.is_connected():
+                log.warning(f"Voice client gone before {track.title!r} could play; dropping it")
+                return
+            played, failure = await self._stream_once(vc, track, position, announce=not announced)
+            announced = True
+            position += played
+            if not failure:
+                return
+
+        log.error(f"Giving up on {track.title!r} after {attempt + 1} attempt(s): {failure} "
+                  f"| url={track.webpage_url}")
+        await self._announce(_say("playback_failed", title=track.title, error=failure))
+
+    async def _stream_once(self, vc: discord.VoiceClient, track: Track, offset: float,
+                           announce: bool) -> tuple[float, str]:
+        """Play the track's stream once, starting `offset` seconds in.
+
+        Returns (seconds of audio played, failure). `failure` is "" when the track finished or
+        was skipped, otherwise a short description of what went wrong - which _play retries.
+        """
+        # Seeking is meaningless on a livestream (duration None): rejoin it live instead.
+        before_options = FFMPEG_BEFORE_OPTIONS
+        if offset >= 1 and track.duration:
+            before_options += f" -ss {offset:.2f}"
         # ffmpeg's stderr goes to a temp FILE, not a PIPE: nothing drains a pipe while the track
         # plays, so a chatty stream could fill the 64KB buffer and wedge ffmpeg mid-song.
         errfile = tempfile.TemporaryFile()
         raw = discord.FFmpegPCMAudio(
             track.stream_url,
             executable=FFMPEG_PATH,
-            before_options=FFMPEG_BEFORE_OPTIONS,
+            before_options=before_options,
             options=FFMPEG_OPTIONS,
             stderr=errfile,
         )
-        source = discord.PCMVolumeTransformer(raw, volume=VOLUME)
+        source = _MeteredVolume(raw, volume=VOLUME)
         # Keep our OWN reference to the ffmpeg process. discord.py's AudioPlayer.run() calls the
         # `after` callback and THEN source.cleanup(), which resets `_process` to its MISSING
         # sentinel - and our callback only *schedules* the event set, so by the time this
@@ -600,7 +775,6 @@ class GuildPlayer:
 
         self._finished.clear()
         self._play_error = None
-        self._skip_requested = False
         loop = asyncio.get_running_loop()
 
         def _after(error: Optional[Exception]) -> None:
@@ -609,13 +783,14 @@ class GuildPlayer:
             loop.call_soon_threadsafe(self._finished.set)
 
         log.info(f"Playing {track.title!r} ({_format_duration(track.duration)}) in "
-                 f"guild {self.guild.id}, requested by {track.requested_by}")
+                 f"guild {self.guild.id}, requested by {track.requested_by}"
+                 + (f", resuming at {offset:.0f}s" if offset >= 1 else ""))
         started = time.monotonic()
         vc.play(source, after=_after)
-        if track.suppress_announce:
+        if announce and track.suppress_announce:
             log.info(f"Not posting a now-playing line for {track.title!r} - the reply that "
                      f"queued it already carries the title and link")
-        else:
+        elif announce:   # a retry of a track already announced stays quiet
             await self._announce(_say(
                 "now_playing",
                 title=track.title,
@@ -626,18 +801,22 @@ class GuildPlayer:
             ))
         await self._finished.wait()
         elapsed = time.monotonic() - started
+        played = source.seconds
 
         # Diagnostics must never be able to break playback - that is exactly how the
         # '_MissingSentinel has no attribute poll' bug took down every track it reported on.
+        # If they fail, the attempt counts as a success: better a missed retry than a loop.
         try:
-            await self._report_playback(track, elapsed, errfile, ffmpeg_proc)
+            return played, self._assess_playback(track, offset, played, elapsed, errfile,
+                                                 ffmpeg_proc)
         except Exception:
             log.exception(f"Playback diagnostics failed for {track.title!r} (playback itself "
                           f"was unaffected)")
+            return played, ""
 
-    async def _report_playback(self, track: Track, elapsed: float, errfile,
-                               ffmpeg_proc) -> None:
-        """Work out whether the track really played, and say so loudly if it didn't."""
+    def _assess_playback(self, track: Track, offset: float, played: float, elapsed: float,
+                         errfile, ffmpeg_proc) -> str:
+        """Work out whether the track really played. Returns "" if so, else what went wrong."""
         stderr_text = _read_stderr(errfile)
         returncode = None
         if ffmpeg_proc is not None:
@@ -646,26 +825,69 @@ class GuildPlayer:
             except Exception:
                 returncode = None
 
+        if self._skip_requested:
+            log.info(f"Stopped {track.title!r} on request after {offset + played:.0f}s")
+            return ""
+        detail = _first_error_line(stderr_text)
         if self._play_error:
-            log.error(f"Audio error on {track.title!r}: {self._play_error}")
+            log.warning(f"Audio error on {track.title!r}: {self._play_error}")
+            return f"audio error: {self._play_error}"
 
         # THE IMPORTANT CHECK. When ffmpeg cannot open the stream (an expired or client-mismatched
         # YouTube URL 403s), it exits immediately and discord.py reports that through `after` as
         # an ordinary end-of-track. Without this, a whole queue silently drains in seconds with no
         # audio, no error, and nothing in the logs - which is exactly how this bug hid.
         # `duration is None` means a livestream, which should never end this fast either.
-        expected_to_run = track.duration is None or track.duration > MIN_PLAYBACK_SECONDS
-        if not self._skip_requested and expected_to_run and elapsed < MIN_PLAYBACK_SECONDS:
-            detail = _first_error_line(stderr_text) or f"ffmpeg exited with code {returncode}"
-            log.error(
+        remaining = None if track.duration is None else track.duration - offset
+        if (remaining is None or remaining > MIN_PLAYBACK_SECONDS) and played < MIN_PLAYBACK_SECONDS:
+            if offset and not stderr_text:
+                # A resume that found nothing left and no error: the audio was simply shorter
+                # than YouTube's stated duration, so the earlier "drop" was really the end.
+                log.info(f"Finished {track.title!r}: no audio past {offset:.0f}s")
+                return ""
+            log.warning(
                 f"NO AUDIO for {track.title!r}: ffmpeg ended after {elapsed:.2f}s "
                 f"(rc={returncode}). {detail} | url={track.webpage_url}"
             )
-            await self._announce(_say("playback_failed", title=track.title, error=detail))
-        elif stderr_text:
-            log.warning(f"ffmpeg warnings on {track.title!r}: {_first_error_line(stderr_text)}")
+            return detail or f"ffmpeg exited with code {returncode}"
+
+        # Audio started but stopped well short of the track's length: the stream dropped and
+        # ffmpeg's own -reconnect couldn't recover it.
+        reached = offset + played
+        if track.duration and reached < track.duration - EARLY_END_SLACK:
+            log.warning(f"Stream for {track.title!r} dropped at {reached:.0f}s of "
+                        f"{track.duration}s (rc={returncode}). {detail}")
+            return detail or f"the stream dropped at {_format_duration(int(reached))}"
+
+        if stderr_text:
+            log.warning(f"ffmpeg warnings on {track.title!r}: {detail}")
         else:
             log.info(f"Finished {track.title!r} after {elapsed:.0f}s")
+        return ""
+
+
+class _MeteredVolume(discord.PCMVolumeTransformer):
+    """PCMVolumeTransformer that counts the audio it has actually handed to Discord.
+
+    That count is the track's real playback position - wall-clock time includes pauses, and
+    discord.py doesn't expose a position of its own. It's what lets a dropped stream resume
+    where it stopped (ffmpeg -ss) instead of from the top. read() runs on the audio thread;
+    the count is only read after playback ends.
+    """
+
+    def __init__(self, original: discord.AudioSource, volume: float = 1.0):
+        super().__init__(original, volume=volume)
+        self.frames = 0
+
+    def read(self) -> bytes:
+        data = super().read()
+        if data:
+            self.frames += 1
+        return data
+
+    @property
+    def seconds(self) -> float:
+        return self.frames * discord.opus.Encoder.FRAME_LENGTH / 1000
 
 
 def _read_stderr(errfile) -> str:
@@ -711,7 +933,7 @@ def _player_for(guild: discord.Guild) -> GuildPlayer:
 # === Commands ===
 
 _CMD_RE = re.compile(
-    r"^!(play|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
+    r"^!(play|p|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -741,7 +963,7 @@ async def handle_command(message: discord.Message) -> bool:
     player = _player_for(message.guild)
     player.text_channel = message.channel
 
-    if command == "play":
+    if command in ("play", "p"):
         await _cmd_play(message, argument)
     elif command == "skip":
         await _cmd_skip(message, player)
@@ -774,6 +996,8 @@ class PlayResult:
     title: str = ""
     url: str = ""          # the YouTube page URL, so callers can link the track
     position: int = 0
+    playlist: Optional[str] = None   # set when a playlist was queued; title/url are its first track
+    count: int = 1                   # tracks queued
 
 
 def _bot_voice_channel(guild: Optional[discord.Guild]) -> Optional[discord.VoiceChannel]:
@@ -849,8 +1073,7 @@ async def enqueue_request(message: discord.Message, query: str,
     player.text_channel = message.channel
 
     try:
-        track = await resolve_track(query, requested_by=message.author.display_name)
-        log.info(f"Resolved {query!r} -> {track.title!r} ({_format_duration(track.duration)})")
+        resolved = await resolve_request(query, requested_by=message.author.display_name)
     except (asyncio.TimeoutError, TimeoutError):
         log.error(f"YouTube did not answer within {RESOLVE_TIMEOUT}s for {query!r}")
         return PlayResult(False, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
@@ -865,14 +1088,25 @@ async def enqueue_request(message: discord.Message, query: str,
                   f"{type(e).__name__}: {str(e)[:400]}")
         return PlayResult(False, _say("youtube_error", query=query, error=hint))
 
-    limit_seconds = MAX_DURATION_MINUTES * 60
-    if limit_seconds and track.duration and track.duration > limit_seconds:
-        return PlayResult(False, _say(
-            "too_long",
-            duration=_format_duration(track.duration),
-            limit=_format_duration(limit_seconds),
-            title=track.title,
-        ))
+    limit = _format_duration(MAX_DURATION_MINUTES * 60)
+    if resolved.playlist is None:
+        track = resolved.tracks[0]
+        log.info(f"Resolved {query!r} -> {track.title!r} ({_format_duration(track.duration)})")
+        if _too_long(track.duration):
+            return PlayResult(False, _say(
+                "too_long",
+                duration=_format_duration(track.duration),
+                limit=limit,
+                title=track.title,
+            ))
+        tracks = [track]
+    else:
+        tracks = [t for t in resolved.tracks if not _too_long(t.duration)]
+        too_long = len(resolved.tracks) - len(tracks)
+        log.info(f"Resolved playlist {query!r} -> {resolved.playlist!r}: {len(tracks)} playable, "
+                 f"{too_long} over the length limit, {resolved.dead} unavailable")
+        if not tracks:
+            return PlayResult(False, _say("playlist_empty", playlist=resolved.playlist))
 
     # Decided only now, after the lookup: the bot may have idled out of (or been moved
     # between) channels while yt-dlp was busy, which changes where this request can go.
@@ -907,16 +1141,46 @@ async def enqueue_request(message: discord.Message, query: str,
     # player loop stays silent for them however long they sit in the queue - one announcement,
     # not two. `!play` is unaffected: its caller deletes its own placeholder and relies on the
     # player loop's now-playing line.
-    track.suppress_announce = (source == "tool")
+    # For a playlist, only its first track is named in the reply; the rest announce normally.
+    tracks[0].suppress_announce = (source == "tool")
 
-    position = player.enqueue(track)
+    if resolved.playlist is not None:
+        # Re-measured now: the queue may have filled up while yt-dlp was busy.
+        room = MAX_QUEUE - len(player.queue)
+        if room <= 0:
+            return PlayResult(False, _say("queue_full", limit=MAX_QUEUE))
+        overflow = max(0, len(tracks) - room)
+        tracks = tracks[:room]
+
+    position = player.enqueue(tracks[0])
+    for extra in tracks[1:]:
+        player.enqueue(extra)
     player.start()
-    log.info(f"[{source}] queued {track.title!r} at position {position} "
-             f"(currently playing: {player.current.title if player.current else 'nothing'})")
+    track = tracks[0]
+    log.info(f"[{source}] queued {len(tracks)} track(s) starting with {track.title!r} at "
+             f"position {position} (currently playing: "
+             f"{player.current.title if player.current else 'nothing'})")
+    started = position == 1 and player.current is None
+
+    if resolved.playlist is not None:
+        left_out = [f"{n} {why}" for n, why in (
+            (overflow, f"didn't fit in the queue (max {MAX_QUEUE})"),
+            (too_long, f"longer than {limit}"),
+            (resolved.dead, "unavailable"),
+        ) if n]
+        return PlayResult(True, _say(
+            "playlist_queued",
+            count=len(tracks),
+            playlist=resolved.playlist,
+            skipped=f" Left out: {', '.join(left_out)}." if left_out else "",
+            position=position,
+            url=query,
+        ), started=started, title=track.title, url=track.webpage_url, position=position,
+            playlist=resolved.playlist, count=len(tracks))
 
     # Position 1 with nothing playing means the player loop is about to post its own
     # "now playing" line, so the caller must not repeat it.
-    if position == 1 and player.current is None:
+    if started:
         return PlayResult(True, f"Now playing: {track.title}", started=True,
                           title=track.title, url=track.webpage_url, position=position)
     return PlayResult(True, _say(
@@ -958,7 +1222,7 @@ async def _cmd_play(message: discord.Message, query: str) -> None:
         pass
 
     result = await enqueue_request(message, query, source="command")
-    if result.started:
+    if result.started and result.playlist is None:
         await _delete_quietly(status)   # the player loop posts "now playing" instead
     else:
         await _edit_or_send(status, message, result.message)
