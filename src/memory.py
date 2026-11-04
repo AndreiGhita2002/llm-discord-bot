@@ -162,9 +162,15 @@ async def generate_user_summary(
     user_id: str,
     user_name: str,
     recent_messages: list[dict],
-    model: str
+    model: str,
+    num_ctx: int | None = None,
 ) -> str:
-    """Ask the LLM to summarise what it knows about a user, store it, and return it."""
+    """Ask the LLM to summarise what it knows about a user, store it, and return it.
+
+    Pass the main model's `num_ctx`: a request with a different context size (including
+    Ollama's 4096 default when unset) makes Ollama reload the model, which then has to reload
+    again for the next reply.
+    """
     # Filter to just this user's messages
     # TODO: this prefix match is imperfect vs the "name(id)[time]:" input format; pre-existing.
     user_messages = [
@@ -188,7 +194,11 @@ Recent messages:
     client = ollama.AsyncClient()
     response = await client.chat(
         model=model,
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
+        # A 100-word summary needs no reasoning pass - and qwen3.5 does one by default when
+        # `think` is left unset, burning tokens on a background job.
+        think=False,
+        options={"num_ctx": num_ctx} if num_ctx else None,
     )
 
     summary = response.message.content

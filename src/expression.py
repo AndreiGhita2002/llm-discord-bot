@@ -108,14 +108,23 @@ _actions: dict[str, Action] = {}
 _enabled = False
 _chance = 1.0
 _model: Optional[str] = None
+# Context size for the decision call. MUST match the main model's num_ctx when both use the
+# same model: Ollama starts a runner with a fixed context, and a request asking for a different
+# one makes it RELOAD the model. A 4096 here used to reload the 23GB model after every reply,
+# and again on the next message - throwing away its prompt cache each time.
+_num_ctx = 4096
 # (action key, scope id) -> unix time of the last run, for cooldowns.
 _last_run: dict[tuple[str, int], float] = {}
 
 
-def configure(cfg: Optional[dict], model: str) -> list[str]:
-    """Read the `expression:` config block. Returns the active action keys."""
-    global _actions, _enabled, _chance, _model
+def configure(cfg: Optional[dict], model: str, num_ctx: int = 4096) -> list[str]:
+    """Read the `expression:` config block. Returns the active action keys.
+
+    `num_ctx` should be the main model's context size (see `_num_ctx`).
+    """
+    global _actions, _enabled, _chance, _model, _num_ctx
     cfg = cfg or {}
+    _num_ctx = int(num_ctx)
     _enabled = bool(cfg.get("enabled", True))
     _chance = float(cfg.get("chance", 1.0))
     _model = cfg.get("model") or model
@@ -258,7 +267,7 @@ async def express(message, user_text: str, reply_text: str, ctx: ToolContext,
                 # answer is parseable rather than a sentence about wanting to react.
                 think=False,
                 format="json",
-                options={"num_ctx": 4096},
+                options={"num_ctx": _num_ctx},  # same as the main call - see _num_ctx
             ),
             timeout=DECISION_TIMEOUT,
         )

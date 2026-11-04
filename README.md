@@ -219,6 +219,15 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 
 ## Changelog
 
+### v0.2.10
+
+- **Faster replies after the first**: the background calls made after a reply (the expression
+  pass and user-summary updates) now use the same context size as the main model. A mismatched
+  size makes Ollama reload the whole model, so previously it reloaded after a reply and again on
+  the next message.
+- **User summaries no longer hold up the channel**: the summary update now runs in the
+  background instead of delaying the next message, and skips the reasoning pass it never needed.
+
 ### v0.2.9
 
 - **`!p`** works as a shortcut for `!play`.

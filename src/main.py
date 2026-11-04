@@ -159,6 +159,18 @@ REQUEST_TIMEOUT = CONFIG.get("request_timeout", 180)
 # taking the "you MUST call the tool, never act it out in prose" rules with it. The model then
 # performs the tool instead of calling it, or emits reasoning with no room left for a reply.
 NUM_CTX = CONFIG.get("num_ctx", 16384)
+# EVERY call to MODEL must use this same num_ctx (expression.py and memory.py are passed it).
+# Ollama starts a model's runner with a fixed context size; a request asking for a different
+# one forces a full reload of the model - seconds for a 23GB model, plus the loss of the cached
+# system-prompt/tool-schema prefix. Mismatched sizes here once meant a reload after every
+# reply (expression pass at 4096) and another on the next message (back to 16384).
+#
+# Ollama also serves ONE request per model at a time by default, so the background calls made
+# after a reply (expression decision, user summary) sit in the queue ahead of the next user
+# message. OLLAMA_NUM_PARALLEL (an env var on the Ollama server, not bot config) would let them
+# run concurrently, but each parallel slot gets its own num_ctx-sized KV cache, multiplying
+# context memory - not affordable alongside a 23GB model, so we deliberately run with 1 and
+# keep background work light instead.
 # --- Self-recovery watchdog ---------------------------------------------------------------
 # A background OS thread checks that the asyncio event loop is still advancing. An async task
 # bumps a heartbeat every few seconds; if it stops advancing for WATCHDOG_TIMEOUT seconds the
@@ -770,7 +782,7 @@ async def _generate_reply(message: discord.Message, ref_msg, ctx: ToolContext):
     # initiative. Detached deliberately - the reply is already on screen, so this costs the
     # user no latency, and a reaction landing a moment later is how a person does it anyway.
     # It gets the tools that already ran so it never repeats what the reply just did.
-    asyncio.create_task(expression.express(
+    _spawn_background(expression.express(
         message,
         user_text=message.content,
         reply_text=response,
@@ -793,21 +805,41 @@ async def _generate_reply(message: discord.Message, ref_msg, ctx: ToolContext):
             except Exception as mem_err:
                 log.warning(f"Failed to store conversation: {mem_err}")
 
-        # Occasionally update user summary (bounded so a stalled Ollama can't hang here either)
+        # Occasionally update user summary. Detached like the expression pass: this runs inside
+        # the per-channel lock, so awaiting a full LLM call here made the NEXT message in the
+        # channel wait for it. (Still bounded, so a stalled Ollama can't leave it hanging.)
         # TODO: we could use some basic language analysis to determine if the user said anything important
         if do_user_memory and random.random() < USER_SUMMARY_CHANCE:
-            try:
-                await asyncio.wait_for(
-                    memory.generate_user_summary(
-                        user_id=str(message.author.id),
-                        user_name=message.author.display_name,
-                        recent_messages=messages,
-                        model=MODEL,
-                    ),
-                    timeout=REQUEST_TIMEOUT,
-                )
-            except Exception as sum_err:
-                log.warning(f"Failed to generate user summary: {sum_err}")
+            _spawn_background(_update_user_summary(message, messages))
+
+
+async def _update_user_summary(message: discord.Message, messages: list[dict]):
+    """Regenerate the author's user summary in the background (see _generate_reply)."""
+    try:
+        await asyncio.wait_for(
+            memory.generate_user_summary(
+                user_id=str(message.author.id),
+                user_name=message.author.display_name,
+                recent_messages=messages,
+                model=MODEL,
+                num_ctx=NUM_CTX,
+            ),
+            timeout=REQUEST_TIMEOUT,
+        )
+    except Exception as sum_err:
+        log.warning(f"Failed to generate user summary: {sum_err}")
+
+
+# Strong references to detached tasks: the event loop only holds weak ones, so a task nobody
+# references can be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 # === !help ===================================================================================
@@ -980,7 +1012,7 @@ if __name__ == "__main__":
 
     # Spontaneous expression runs AFTER a reply is sent, so it must be configured after the
     # tool registry: every action it can take is gated on that tool being enabled.
-    expressive = expression.configure(CONFIG.get("expression"), MODEL)
+    expressive = expression.configure(CONFIG.get("expression"), MODEL, num_ctx=NUM_CTX)
     print(f"Spontaneous expression: {', '.join(expressive) if expressive else 'off'}")
 
     # Point the persistent reminder store at its file (reminders are rescheduled in on_ready).
