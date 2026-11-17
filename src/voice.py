@@ -9,13 +9,15 @@ doesn't trigger Discord's native slash-command autocomplete popup:
                                  (`!p` for short; a playlist link queues the whole playlist;
                                  a Spotify track/album/playlist link is matched on YouTube)
     !search <search terms>       show the top YouTube results with buttons to pick one
-    !skip                        skip the current track
+    !skip                        skip the current track (`!s` for short)
     !stop                        clear the queue and stop playing (stay connected)
     !leave                       stop and disconnect
-    !queue                       show what's lined up
-    !np                          show the current track
+    !queue [page]                show what's lined up, a page at a time (with ◀ ▶ buttons)
+    !remove <n> [n...]           remove queued tracks (numbers/ranges as !queue shows them)
+    !np                          show the current track (also !nowplaying, !wp, !whatsplaying)
     !pause  !resume
     !timestamp <time>            jump to a point in the current track (1:23, 90, 1m30s)
+    !move <from> [to]            reorder the queue (positions as !queue shows them; to = 1 if omitted)
 
 Audio is streamed, never downloaded: yt-dlp resolves a direct media URL and ffmpeg pipes it
 into Discord. yt-dlp does blocking network I/O, so every resolve runs through
@@ -105,6 +107,8 @@ _PERMANENT_ERROR_KINDS = frozenset({"unavailable", "age-gated", "bot-check", "no
 SEARCH_RESULTS = 5
 # How long a !search picker's buttons stay live.
 SEARCH_PICKER_TIMEOUT = 120.0
+QUEUE_PAGE_SIZE = 10            # tracks per !queue page
+QUEUE_PAGER_TIMEOUT = 180.0     # how long !queue's page buttons stay live
 
 # ffmpeg flags: -vn drops video; the reconnect flags let it recover from a dropped HTTP
 # stream mid-song instead of ending the track early.
@@ -157,6 +161,8 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
     ],
     "paused": ["⏸️ Paused."],
     "seeked": ["⏩ Jumped to {time} in **{title}**."],
+    "moved": ["↕️ Moved **{title}** to #{position} in the queue."],
+    "removed": ["🗑️ Removed **{title}** from the queue."],
     "resumed": ["▶️ Resumed."],
     "not_in_voice": [
         "You need to be in a voice channel first.",
@@ -299,11 +305,15 @@ COMMAND_HELP: list[tuple[str, str]] = [
                             "a Spotify track, album or playlist link is found on YouTube. "
                             "`!p` works too"),
     ("!search <song>", f"Show the top {SEARCH_RESULTS} YouTube results and pick which to play"),
-    ("!skip", "Skip the current track"),
+    ("!skip", "Skip the current track (`!s` for short)"),
     ("!stop", "Stop playing and clear the queue"),
     ("!leave", "Stop and leave the voice channel"),
-    ("!queue", "Show what's lined up"),
-    ("!np", "Show what's playing right now"),
+    ("!queue [page]", "Show what's lined up, a page at a time (◀ ▶ buttons to flip pages)"),
+    ("!remove <n> [n...]", "Remove queued tracks by their `!queue` number - e.g. `!remove 3`, "
+                           "`!remove 2 5`, `!remove 4-7`"),
+    ("!move <from> [to]", "Move a queued track to another position (numbers as in `!queue`); "
+                          "leave out `to` to make it play next"),
+    ("!np", "Show what's playing right now (also `!wp`)"),
     ("!pause / !resume", "Pause or resume playback"),
     ("!timestamp <time>", "Jump to a point in the current track: `1:23`, `1:02:03`, `90` or `1m30s`"),
 ]
@@ -1088,7 +1098,8 @@ def _player_for(guild: discord.Guild) -> GuildPlayer:
 # === Commands ===
 
 _CMD_RE = re.compile(
-    r"^!(play|p|search|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume|timestamp)"
+    r"^!(play|p|search|skip|s|stop|leave|disconnect|queue|np|nowplaying|wp|whatsplaying|pause|"
+    r"resume|timestamp|move|remove)"
     r"\b\s*(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
@@ -1123,15 +1134,17 @@ async def handle_command(message: discord.Message) -> bool:
         await _cmd_play(message, argument)
     elif command == "search":
         await _cmd_search(message, argument)
-    elif command == "skip":
+    elif command in ("skip", "s"):
         await _cmd_skip(message, player)
     elif command == "stop":
         await _cmd_stop(message, player)
     elif command in ("leave", "disconnect"):
         await _cmd_leave(message, player)
     elif command == "queue":
-        await _cmd_queue(message, player)
-    elif command in ("np", "nowplaying"):
+        await _cmd_queue(message, player, argument)
+    elif command == "remove":
+        await _cmd_remove(message, player, argument)
+    elif command in ("np", "nowplaying", "wp", "whatsplaying"):
         await _cmd_nowplaying(message, player)
     elif command == "pause":
         await _cmd_pause(message, player)
@@ -1139,6 +1152,8 @@ async def handle_command(message: discord.Message) -> bool:
         await _cmd_resume(message, player)
     elif command == "timestamp":
         await _cmd_timestamp(message, player, argument)
+    elif command == "move":
+        await _cmd_move(message, player, argument)
     return True
 
 
@@ -1592,18 +1607,174 @@ async def _cmd_leave(message: discord.Message, player: GuildPlayer) -> None:
     await message.reply(_say("left"))
 
 
-async def _cmd_queue(message: discord.Message, player: GuildPlayer) -> None:
+def render_queue(player: "GuildPlayer", page: int = 1) -> tuple[Optional[str], int, int]:
+    """One page of the queue as chat text: (text, page actually shown, page count).
+
+    Text is None when nothing is playing or queued. Numbers are positions in the WHOLE queue
+    (page 2 starts at 11), so they're what !move and !remove take. Rendered from the live
+    queue every time, so flipping pages always shows the current state.
+    """
+    queue = list(player.queue)
+    if player.current is None and not queue:
+        return None, 1, 1
+    pages = max(1, -(-len(queue) // QUEUE_PAGE_SIZE))
+    page = min(max(1, page), pages)
     lines = []
     if player.current:
-        lines.append(f"▶️ **{player.current.title}** [{_format_duration(player.current.duration)}]")
-    for i, track in enumerate(player.queue[:10], start=1):
-        lines.append(f"{i}. {track.title} [{_format_duration(track.duration)}] — {track.requested_by}")
-    if len(player.queue) > 10:
-        lines.append(f"…and {len(player.queue) - 10} more.")
-    if not lines:
+        lines.append(f"▶️ **{player.current.title}** "
+                     f"[{_format_duration(player.current.duration)}]")
+    first = (page - 1) * QUEUE_PAGE_SIZE
+    for i, track in enumerate(queue[first:first + QUEUE_PAGE_SIZE], start=first + 1):
+        lines.append(f"{i}. {track.title} [{_format_duration(track.duration)}] "
+                     f"— {track.requested_by}")
+    if not queue:
+        lines.append("Nothing queued after this one.")
+    elif pages > 1:
+        lines.append(f"Page {page}/{pages} · {len(queue)} tracks queued")
+    return "\n".join(lines)[:1900], page, pages
+
+
+class QueuePager(discord.ui.View):
+    """◀ ▶ buttons under a !queue page. Anyone can flip pages; each flip re-renders the live
+    queue, so it never shows a stale list."""
+
+    def __init__(self, player: "GuildPlayer", page: int):
+        super().__init__(timeout=QUEUE_PAGER_TIMEOUT)
+        self.player = player
+        self.page = page
+        self.message: Optional[discord.Message] = None
+        self.prev = discord.ui.Button(label="◀", style=discord.ButtonStyle.secondary)
+        self.next = discord.ui.Button(label="▶", style=discord.ButtonStyle.secondary)
+        self.prev.callback = self._flipper(-1)
+        self.next.callback = self._flipper(+1)
+        self.add_item(self.prev)
+        self.add_item(self.next)
+
+    def sync(self, pages: int) -> None:
+        self.prev.disabled = self.page <= 1
+        self.next.disabled = self.page >= pages
+
+    def _flipper(self, step: int):
+        async def callback(interaction: discord.Interaction) -> None:
+            text, self.page, pages = render_queue(self.player, self.page + step)
+            if text is None:
+                self.stop()
+                await interaction.response.edit_message(content=_say("nothing_playing"),
+                                                        view=None)
+                return
+            self.sync(pages)
+            await interaction.response.edit_message(content=text,
+                                                    view=self if pages > 1 else None)
+        return callback
+
+    async def on_timeout(self) -> None:
+        if self.message is not None:
+            try:
+                await self.message.edit(view=None)
+            except Exception as e:
+                log.debug(f"Could not expire queue pager: {e}")
+
+
+async def _cmd_queue(message: discord.Message, player: GuildPlayer, argument: str = "") -> None:
+    page = int(argument) if argument.strip().isdigit() else 1
+    text, page, pages = render_queue(player, page)
+    if text is None:
         await message.reply(_say("nothing_playing"))
         return
-    await message.reply("\n".join(lines)[:1900])
+    if pages == 1:
+        await message.reply(text)
+        return
+    view = QueuePager(player, page)
+    view.sync(pages)
+    view.message = await message.reply(text, view=view)
+
+
+_RANGE_RE = re.compile(r"^(\d+)(?:-(\d+))?$")
+
+
+def parse_positions(argument: str) -> Optional[list[int]]:
+    """"3", "2 5", "2, 5", "#4", "4-7" -> sorted unique positions; None if any part isn't one."""
+    positions: set[int] = set()
+    parts = argument.replace(",", " ").replace("#", "").split()
+    if not parts:
+        return None
+    for part in parts:
+        m = _RANGE_RE.match(part)
+        if not m:
+            return None
+        low = int(m.group(1))
+        high = int(m.group(2)) if m.group(2) else low
+        if high < low:
+            low, high = high, low
+        positions.update(range(low, high + 1))
+    return sorted(positions)
+
+
+def remove_from_queue(queue: list, positions: list[int]) -> tuple[list, Optional[str]]:
+    """Remove the tracks at these 1-based positions. All or nothing: if any position doesn't
+    exist the queue is left alone. Returns (removed tracks in queue order, error line)."""
+    if not queue:
+        return [], "The queue's empty — nothing to remove."
+    missing = [p for p in positions if not 1 <= p <= len(queue)]
+    if missing:
+        return [], (f"There's no #{missing[0]} in the queue (it has {len(queue)}). "
+                    f"Nothing was removed.")
+    removed = [queue[p - 1] for p in positions]
+    for p in sorted(positions, reverse=True):
+        del queue[p - 1]
+    return removed, None
+
+
+async def _cmd_remove(message: discord.Message, player: GuildPlayer, argument: str) -> None:
+    positions = parse_positions(argument)
+    if positions is None:
+        await message.reply("Usage: `!remove <n>` — numbers as `!queue` shows them, e.g. "
+                            "`!remove 3`, `!remove 2 5` or `!remove 4-7`.")
+        return
+    removed, error = remove_from_queue(player.queue, positions)
+    if error:
+        await message.reply(error)
+        return
+    log.info(f"{message.author} removed {len(removed)} track(s) at {positions} "
+             f"in guild {player.guild.id}")
+    if len(removed) == 1:
+        await message.reply(_say("removed", title=removed[0].title))
+        return
+    names = ", ".join(f"**{t.title}**" for t in removed[:5])
+    more = f" and {len(removed) - 5} more" if len(removed) > 5 else ""
+    await message.reply(f"🗑️ Removed {len(removed)} tracks: {names}{more}."[:1900])
+
+
+def move_in_queue(queue: list, src: int, dst: int) -> Optional[str]:
+    """Move queue[src-1] to position dst (both 1-based, as !queue numbers them). Returns an
+    error line, or None on success. A `to` past the end means "last"."""
+    if not queue:
+        return "The queue's empty — nothing to move."
+    if not 1 <= src <= len(queue):
+        return f"There's no #{src} in the queue (it has {len(queue)})."
+    if dst < 1:
+        return "Positions start at 1."
+    queue.insert(min(dst, len(queue)) - 1, queue.pop(src - 1))
+    return None
+
+
+async def _cmd_move(message: discord.Message, player: GuildPlayer, argument: str) -> None:
+    numbers = argument.replace("#", " ").split()
+    if not 1 <= len(numbers) <= 2 or not all(n.isdigit() for n in numbers):
+        await message.reply("Usage: `!move <from> [to]` — positions as `!queue` shows them, "
+                            "e.g. `!move 5 1`. Leave out `to` to make it play next.")
+        return
+    src = int(numbers[0])
+    dst = int(numbers[1]) if len(numbers) == 2 else 1
+    error = move_in_queue(player.queue, src, dst)
+    if error:
+        await message.reply(error)
+        return
+    position = min(dst, len(player.queue))
+    track = player.queue[position - 1]
+    log.info(f"{message.author} moved {track.title!r} from #{src} to #{position} "
+             f"in guild {player.guild.id}")
+    await message.reply(_say("moved", title=track.title, position=position))
 
 
 async def _cmd_nowplaying(message: discord.Message, player: GuildPlayer) -> None:

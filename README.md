@@ -131,11 +131,13 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 | `!play <spotify link>` | Finds the Spotify track, album or playlist on YouTube and plays that |
 | `!p ...` | Short for `!play` |
 | `!search <search terms>` | Lists the top 5 YouTube results with a button for each - pick one to play it |
-| `!skip` | Skip the current track |
+| `!skip` | Skip the current track (`!s` for short) |
 | `!stop` | Stop and clear the queue (stays connected) |
 | `!leave` | Stop and disconnect |
-| `!queue` | Show what's lined up |
-| `!np` | Show the current track |
+| `!queue [page]` | Show what's lined up, 10 per page, with ◀ ▶ buttons to flip pages |
+| `!remove <n> [n...]` | Remove queued tracks by their `!queue` number - `!remove 3`, `!remove 2 5`, `!remove 4-7` |
+| `!move <from> [to]` | Move a queued track to another position (as numbered in `!queue`); without `to` it plays next |
+| `!np` | Show the current track (also `!nowplaying`, `!wp`, `!whatsplaying`) |
 | `!pause`, `!resume` | Pause / resume playback |
 | `!timestamp <time>` | Jump to a point in the current track - `1:23`, `1:02:03`, `90` or `1m30s` |
 
@@ -228,6 +230,16 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 - **`!help`** to list every command
 
 ## Changelog
+
+### v0.2.12
+
+- **`!move <from> [to]`** reorders the queue: `!move 5 1` moves the fifth track to the front,
+  and `!move 5` does the same. Positions are the numbers `!queue` shows.
+- **`!remove <n>`** takes tracks out of the queue - one (`!remove 3`), several (`!remove 2 5`)
+  or a range (`!remove 4-7`).
+- **`!queue` pages**: the whole queue is viewable 10 at a time with ◀ ▶ buttons, or jump
+  straight to a page with `!queue 3`.
+- **Shortcuts**: `!s` for `!skip`; `!wp` / `!whatsplaying` for `!np`.
 
 ### v0.2.11
 

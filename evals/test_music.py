@@ -505,6 +505,139 @@ async def a_seek_does_not_use_up_a_retry():
     assert [a for _, a in calls] == [True, False, False, False]
 
 
+# === !move ===
+
+@check
+async def move_reorders_the_queue_by_its_displayed_numbers():
+    q = list("ABCDE")
+    assert voice.move_in_queue(q, 5, 1) is None and q == list("EABCD")
+    q = list("ABCDE")
+    assert voice.move_in_queue(q, 1, 3) is None and q == list("BCADE")
+    q = list("ABCDE")
+    assert voice.move_in_queue(q, 2, 99) is None and q == list("ACDEB")   # past the end = last
+    q = list("ABC")
+    assert voice.move_in_queue(q, 2, 2) is None and q == list("ABC")
+
+
+@check
+async def move_rejects_positions_that_do_not_exist_and_leaves_the_queue_alone():
+    q = list("ABC")
+    for src, dst in [(0, 1), (4, 1), (2, 0)]:
+        assert voice.move_in_queue(q, src, dst), (src, dst)
+        assert q == list("ABC")
+    assert "empty" in voice.move_in_queue([], 1, 1)
+
+
+@check
+async def move_command_parses_its_arguments():
+    replies = []
+    msg = SimpleNamespace(author="andrei", reply=lambda text: _record(replies, text))
+    player = SimpleNamespace(queue=[voice.Track(t, "", 100, "") for t in "ABCD"],
+                             guild=SimpleNamespace(id=1))
+    await voice._cmd_move(msg, player, "#4 2")
+    assert [t.title for t in player.queue] == list("ADBC"), [t.title for t in player.queue]
+    await voice._cmd_move(msg, player, "3")   # no `to`: play next
+    assert [t.title for t in player.queue] == list("BADC")
+    await voice._cmd_move(msg, player, "two to one")
+    assert "Usage" in replies[-1] and [t.title for t in player.queue] == list("BADC")
+
+
+# === Command routing, !queue paging, !remove ===
+
+@check
+async def short_aliases_route_to_the_right_command():
+    for text, command in [("!s", "s"), ("!skip", "skip"), ("!search abba", "search"),
+                          ("!stop", "stop"), ("!wp", "wp"), ("!whatsplaying", "whatsplaying"),
+                          ("!np", "np"), ("!remove 3", "remove"), ("!queue 2", "queue"),
+                          ("!p song", "p"), ("!pause", "pause")]:
+        m = voice._CMD_RE.match(text)
+        assert m and m.group(1) == command, (text, m and m.group(1))
+    for text in ["!sing", "!wpx", "!removeall", "!spotify"]:
+        assert not voice._CMD_RE.match(text), text
+
+
+def queue_player(n, current=True):
+    return SimpleNamespace(
+        queue=[voice.Track(f"T{i}", "", 100, "", requested_by="a") for i in range(1, n + 1)],
+        current=voice.Track("NOW", "", 200, "") if current else None,
+        guild=SimpleNamespace(id=1))
+
+
+@check
+async def queue_pages_number_by_position_in_the_whole_queue():
+    player = queue_player(25)
+    text, page, pages = voice.render_queue(player, 2)
+    assert (page, pages) == (2, 3)
+    lines = text.splitlines()
+    assert lines[0].startswith("▶️ **NOW**")
+    assert lines[1].startswith("11. T11") and lines[10].startswith("20. T20"), lines
+    assert lines[-1] == "Page 2/3 · 25 tracks queued"
+    assert voice.render_queue(player, 99)[1] == 3      # clamped to the last page
+    assert voice.render_queue(player, 0)[1] == 1
+
+
+@check
+async def a_short_queue_has_no_page_footer_and_an_empty_one_says_so():
+    text, _, pages = voice.render_queue(queue_player(3))
+    assert pages == 1 and "Page" not in text
+    assert "Nothing queued" in voice.render_queue(queue_player(0))[0]
+    assert voice.render_queue(queue_player(0, current=False))[0] is None
+
+
+@check
+async def queue_buttons_flip_pages_and_show_the_live_queue():
+    player = queue_player(25)
+    view = voice.QueuePager(player, 1)
+    view.sync(3)
+    assert view.prev.disabled and not view.next.disabled
+    click = interaction()
+    await view.next.callback(click)
+    assert view.page == 2 and "11. T11" in click.response.edits[-1]["content"]
+    assert not view.prev.disabled
+    del player.queue[10:]            # the queue shrank to one page while the pager was up
+    click = interaction()
+    await view.next.callback(click)
+    assert view.page == 1 and click.response.edits[-1]["view"] is None
+
+
+@check
+async def positions_parse_singles_lists_and_ranges():
+    assert voice.parse_positions("3") == [3]
+    assert voice.parse_positions("2 5, #7") == [2, 5, 7]
+    assert voice.parse_positions("4-6 5") == [4, 5, 6]
+    assert voice.parse_positions("6-4") == [4, 5, 6]
+    for bad in ["", "x", "1 two", "3-", "-3"]:
+        assert voice.parse_positions(bad) is None, bad
+
+
+@check
+async def remove_is_all_or_nothing():
+    q = list("ABCDEF")
+    removed, error = voice.remove_from_queue(q, [2, 4, 5])
+    assert error is None and removed == list("BDE") and q == list("ACF")
+    q = list("ABC")
+    removed, error = voice.remove_from_queue(q, [1, 9])
+    assert error and "#9" in error and removed == [] and q == list("ABC")
+    assert "empty" in voice.remove_from_queue([], [1])[1]
+
+
+@check
+async def remove_command_reports_what_it_removed():
+    replies = []
+    msg = SimpleNamespace(author="andrei", reply=lambda text: _record(replies, text))
+    player = queue_player(8)
+    await voice._cmd_remove(msg, player, "2")
+    assert "T2" in replies[-1] and len(player.queue) == 7
+    await voice._cmd_remove(msg, player, "1-3")
+    assert replies[-1].startswith("🗑️ Removed 3 tracks") and len(player.queue) == 4
+    await voice._cmd_remove(msg, player, "nope")
+    assert "Usage" in replies[-1] and len(player.queue) == 4
+
+
+async def _record(replies, text):
+    replies.append(text)
+
+
 async def main_async() -> int:
     real_ytdlp = voice.yt_dlp
     failures = []
