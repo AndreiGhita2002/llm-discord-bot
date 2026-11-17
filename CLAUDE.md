@@ -363,7 +363,13 @@ normal question rather than being answered with a command dump.
 ## Voice Playback (`voice.py`)
 
 `!play <search terms | url>` makes the bot join the caller's voice channel and stream the top
-YouTube hit. Also `!skip`, `!stop`, `!leave`, `!queue`, `!np`, `!pause`, `!resume`.
+YouTube hit. Also `!search`, `!skip`, `!stop`, `!leave`, `!queue`, `!np`, `!pause`, `!resume`,
+`!timestamp <time>`.
+
+**Limits are off by default**: `max_queue` and `max_duration_minutes` default to 0 = no limit
+(the user asked for both to go). The code paths stay - set either in config and the queue cap,
+the length refusal, the over-length `!play` fallback and the disabled `!search` buttons all come
+back.
 
 These are **text commands matched by regex**, not Discord's slash-command API - same pattern as
 `discord_logging.handle_command`, because the bot runs on a bare `discord.Client` (no
@@ -411,6 +417,14 @@ duration was longer than the actual audio, so it counts as a normal end, not a f
 Livestreams retry without `-ss`. Retries log at WARNING; only giving up posts in chat. A
 `!skip`/`!stop` during a backoff or a resolve is honoured: `_skip_requested` is reset once per
 track, not per attempt.
+
+**`!timestamp <time>`** reuses the same resume path: `GuildPlayer.seek()` sets `_seek_to` and
+stops the voice client; `_play()` sees `_seek_to` after `_stream_once` returns and restarts the
+stream at that offset with `-ss`. A seek is NOT a failed attempt (doesn't consume a retry,
+`_assess_playback` skips its diagnostics) and doesn't re-announce. A seek during the resolve
+just makes the track start there. `-ss` on a real YouTube stream was checked against ffmpeg
+directly (150s in: full audio, 0.2s); not yet through a real voice channel. Livestreams
+(duration None) refuse it.
 
 **Exactly one announcement per track**. Two things can announce a track and they must never
 both fire: the player loop's `now_playing` post, and the `🎶 Now playing: <title> <url>` line
@@ -479,6 +493,9 @@ skip/stop is logged at ERROR (so it reaches the Discord log channel) and reporte
 explanation, because each needs a different fix (cookies file / wait / change player_clients /
 upgrade yt-dlp). Anything unrecognised is logged as `unexpected` at ERROR - that's the signal
 YouTube changed in a way this code hasn't seen. "No results" stays at INFO; it isn't a fault.
+**Signature order matters** (first match wins): both sign-in walls begin "Sign in to confirm" -
+"...your age" vs "...you're not a bot" - and a bare `"sign in to confirm"` needle once filed
+every age-restricted video as `bot-check`, telling the operator to fix cookies.
 
 **Search fallback for `!play <phrase>`**: a phrase is searched flat (`ytsearch5`, one request,
 no media URLs) and the first result within `max_duration_minutes` is resolved - so a top hit
@@ -562,11 +579,14 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [ ] Live-verify voice playback on the deployed bot: after the `davey` and player-client fixes, confirm audio actually reaches a voice channel. Unit + mock-integration tested (queue order, skip, stop, idle disconnect, all `!play` gating paths) and yt-dlp search/stream-URL resolution verified against real YouTube, but no audio has been pushed to a real voice channel yet. Needs the Connect/Speak permissions.
 [ ] Standardise the command set: `voice.py` uses `!play`/`!skip`/… but `discord_logging.py` still uses `/setlogchannel` and `/clearlogchannel`, so the bot answers to two different prefixes (`!help` lists both, but it reads as an inconsistency). Settle on one (`!` avoids colliding with Discord's slash-command autocomplete popup) and move the log commands over. Each module still matches its own regex with `on_message` calling them in sequence - worth factoring into one shared dispatcher (name -> handler + help text) so adding a command is a single entry, the way `tools.py` does it. `COMMAND_HELP` is the first step of that: the help text already lives next to each module's regexes.
 [x] Playlist URLs queue the whole playlist (lazily resolved), `!p` alias, and failed streams are retried with resume - see the Voice Playback section. Live-verify the mid-song resume (`-ss` on a real YouTube stream) on the deployed bot; it's only been tested against a fake voice client.
-[x] Spotify links (track/album/playlist) play via YouTube matches, `!search` picker + `search_music` tool, and `!play` skips top hits over the length limit. Tests: `evals/test_music.py` (19 checks, no network). The Spotify -> YouTube match was verified live against real Spotify/YouTube; the picker buttons have only been tested with fake interactions.
+[x] Spotify links (track/album/playlist) play via YouTube matches, `!search` picker + `search_music` tool, and `!play` skips top hits over the length limit. Tests: `evals/test_music.py` (25 checks, no network). The Spotify -> YouTube match was verified live against real Spotify/YouTube; the picker buttons have only been tested with fake interactions.
 [ ] Live-verify `!search` buttons on real Discord, and that a `spotify.link/...` short link expands (no real short link was available to test; `_expand_short_link` follows the redirect and falls back to scraping the page body).
 [ ] Spotify embed format is undocumented - if Spotify links start failing with "format may have changed", inspect `open.spotify.com/embed/track/<id>`'s `__NEXT_DATA__` and update `spotify.parse_embed`.
 [ ] Add an eval case for `search_music` vs `queue_song` (e.g. "show me some versions of Hallelujah" should call search_music, "play Hallelujah" should call queue_song) - not yet measured on the deployed model.
-[ ] `max_queue` (default 20) also caps playlists, so a 50-track playlist queues 20. Consider a higher default now that playlists exist.
+[x] Queue and length limits removed by default (`max_queue: 0`, `max_duration_minutes: 0` = no limit); `!timestamp <time>` seeks the current track. A host `config.yaml` that sets either still applies it.
+[x] Age-restricted videos were classified as `bot-check` ("set voice.cookies_file to fix") because the bot-check needle `"sign in to confirm"` also matches "Sign in to confirm your age". Fixed by ordering + a `"not a bot"` needle; regression test in test_music.py.
+[ ] Known-cause resolve failures are logged as "Unexpected YouTube response" at ERROR in `enqueue_request` and `offer_search`, even when `classify_youtube_error` recognised them (age-gated, unavailable). Only `unexpected` should be ERROR; known kinds should be WARNING without the "Unexpected" wording, so normal outcomes stop landing in the Discord log channel as alarms.
+[ ] For a search PHRASE (not a link), skip results that fail as age-gated/unavailable and try the next of the 5 search hits - flat search can't tell which are age-restricted, so trying the next is the only way. Links should still fail with the precise reason.
 [ ] Song queue improvements: the basics are already in (`GuildPlayer.queue`, in-order playback, `!queue`, `!skip`, `max_queue` cap, playlists). Missing: shuffle and loop/repeat modes, removing or reordering entries (`!remove <n>`, `!move <from> <to>`), paging for long queues (`!queue` truncates at 10 with no way to see the rest), a "up next" hint when a track ends, and persisting the queue across restarts the way reminders are persisted.
 [x] Expose music to the LLM: the `queue_song` tool lets the model queue tracks ("kronk, put on some jazz"). It routes through `voice.enqueue_request()`, the same path `!play` uses, so the model can't bypass the duration limit, queue cap or permission checks, and it only ever plays in the channel it's already in or joins the *requester's* current one - never one of its own choosing. Gated off entirely when voice playback isn't available.
 [ ] DEPLOY HAZARD (src/ move): `run-bot.sh` is generated by setup-daemon-mac.sh and gitignored, so the host's copy still launches `uv run python main.py`. Deploying the src/ restructure without re-running `./setup-daemon-mac.sh` on the host leaves the runner unable to start the bot (and restart-looping). Re-run the setup script on the host as part of this deploy.

@@ -379,6 +379,132 @@ async def search_rejects_links():
     assert not offer.ok and "!play" in offer.message
 
 
+# === YouTube error classification ===
+
+@check
+async def an_age_restricted_video_is_not_mistaken_for_a_bot_check():
+    # Verbatim from production (2026-11-17), where it was filed under bot-check.
+    age = ("ERROR: [youtube] oI3DF7IUO2w: Sign in to confirm your age. This video may be "
+           "inappropriate for some users. Use --cookies-from-browser or --cookies for the "
+           "authentication.")
+    assert voice.classify_youtube_error(Exception(age))[0] == "age-gated"
+    for apostrophe in ("'", "’"):
+        bot = (f"ERROR: [youtube] abc: Sign in to confirm you{apostrophe}re not a bot. Use "
+               f"--cookies-from-browser or --cookies for the authentication.")
+        assert voice.classify_youtube_error(Exception(bot))[0] == "bot-check", apostrophe
+
+
+# === Limits off by default ===
+
+@check
+async def no_queue_or_length_limit_by_default():
+    voice.configure({})
+    assert voice.MAX_QUEUE == 0 and voice.MAX_DURATION_MINUTES == 0
+    assert not voice._too_long(10 * 3600)
+    real_reason, real_target = voice._unavailable_reason, voice._target_channel
+    voice._unavailable_reason = lambda: None
+    voice._target_channel = lambda m: (SimpleNamespace(name="vc"), None)
+    guild = SimpleNamespace(id=4242, voice_client=None)
+    voice._player_for(guild).queue.extend([object()] * 500)
+    try:
+        assert voice.play_precheck(SimpleNamespace(guild=guild)) is None
+    finally:
+        voice._unavailable_reason, voice._target_channel = real_reason, real_target
+        voice._players.pop(4242, None)
+
+
+# === !timestamp ===
+
+@check
+async def timestamps_parse_in_every_common_shape():
+    for text, seconds in [("1:23", 83), ("01:02:03", 3723), ("90", 90), ("0", 0),
+                          ("1m30s", 90), ("1m30", 90), ("2m", 120), ("1h2m3s", 3723),
+                          (" 45s ", 45)]:
+        assert voice.parse_timestamp(text) == seconds, (text, voice.parse_timestamp(text))
+    for text in ["", "abc", "1:75", "1:2:3:4", "-5", "1.5", "m"]:
+        assert voice.parse_timestamp(text) is None, text
+
+
+class FakeVC:
+    def __init__(self):
+        self.stops = 0
+
+    def is_connected(self):
+        return True
+
+    def is_playing(self):
+        return True
+
+    def is_paused(self):
+        return False
+
+    def stop(self):
+        self.stops += 1
+
+
+async def play_scripted(script, seek_while_loading=None):
+    """Run GuildPlayer._play with each stream attempt scripted. `script` items are called with
+    the player and return (seconds played, failure). Returns [(offset, announce), ...]."""
+    player = voice.GuildPlayer(SimpleNamespace(id=1, voice_client=FakeVC()))
+    calls = []
+
+    async def fake_stream_once(vc, track, offset, announce):
+        calls.append((offset, announce))
+        return script[len(calls) - 1](player)
+
+    async def fake_refresh(track, force=False):
+        if seek_while_loading is not None and not calls:
+            player.seek(seek_while_loading)
+
+    real_refresh, real_backoff = voice._refresh_stream_url, voice.RETRY_BACKOFF
+    voice._refresh_stream_url, voice.RETRY_BACKOFF = fake_refresh, 0
+    player._stream_once = fake_stream_once
+    try:
+        await player._play(voice.Track("t", "https://youtu.be/t", 300, "media://t"))
+    finally:
+        voice._refresh_stream_url, voice.RETRY_BACKOFF = real_refresh, real_backoff
+    return calls, player
+
+
+def seek_to(seconds, played=10.0):
+    def step(player):
+        player.seek(seconds)   # the user types !timestamp while this attempt plays
+        return played, ""
+    return step
+
+
+def finish(player):
+    return 200.0, ""
+
+
+def drop(player):
+    return 5.0, "the stream dropped"
+
+
+@check
+async def timestamp_restarts_the_stream_at_the_target_without_reannouncing():
+    calls, player = await play_scripted([seek_to(90), finish])
+    assert calls == [(0.0, True), (90.0, False)], calls
+    assert player.voice.stops == 1
+
+
+@check
+async def timestamp_while_loading_starts_there():
+    calls, _ = await play_scripted([finish], seek_while_loading=60)
+    assert calls == [(60.0, True)], calls
+
+
+@check
+async def a_seek_does_not_use_up_a_retry():
+    voice.STREAM_RETRIES = 2   # 3 attempts
+    calls, _ = await play_scripted([drop, seek_to(100), drop, drop, finish])
+    # drop (1 failure) -> retry: seek -> restart at 100 (not a failure) -> drop (2) -> drop (3)
+    # -> give up. Without the seek exemption it would have given up one stream earlier.
+    assert len(calls) == 4, calls
+    assert calls[2][0] == 100.0, calls
+    assert [a for _, a in calls] == [True, False, False, False]
+
+
 async def main_async() -> int:
     real_ytdlp = voice.yt_dlp
     failures = []

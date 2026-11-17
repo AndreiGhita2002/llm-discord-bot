@@ -15,6 +15,7 @@ doesn't trigger Discord's native slash-command autocomplete popup:
     !queue                       show what's lined up
     !np                          show the current track
     !pause  !resume
+    !timestamp <time>            jump to a point in the current track (1:23, 90, 1m30s)
 
 Audio is streamed, never downloaded: yt-dlp resolves a direct media URL and ffmpeg pipes it
 into Discord. yt-dlp does blocking network I/O, so every resolve runs through
@@ -70,8 +71,8 @@ FFMPEG_PATH = "ffmpeg"
 OPUS_PATH: Optional[str] = None      # explicit libopus path; only needed if autodetect fails
 COOKIES_FILE: Optional[str] = None   # yt-dlp cookies file (YouTube sometimes demands one)
 VOLUME = 1.0                         # 0.0-2.0, applied via PCMVolumeTransformer
-MAX_DURATION_MINUTES = 180           # refuse anything longer (0 = no limit)
-MAX_QUEUE = 20                       # per-guild queue cap (excluding the current track)
+MAX_DURATION_MINUTES = 0             # refuse anything longer (0 = no limit, the default)
+MAX_QUEUE = 0                        # per-guild queue cap, excluding the current track (0 = none)
 IDLE_TIMEOUT = 300                   # secs with an empty queue before leaving the channel
 RESOLVE_TIMEOUT = 60                 # hard ceiling on a single yt-dlp resolve
 STREAM_URL_TTL = 1800                # re-resolve a queued track's media URL after this long
@@ -155,6 +156,7 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
         "👋 Nothing left to play — leaving the voice channel.",
     ],
     "paused": ["⏸️ Paused."],
+    "seeked": ["⏩ Jumped to {time} in **{title}**."],
     "resumed": ["▶️ Resumed."],
     "not_in_voice": [
         "You need to be in a voice channel first.",
@@ -240,8 +242,8 @@ def configure(cfg: Optional[dict]) -> tuple[bool, str]:
     OPUS_PATH = cfg.get("opus_path") or None
     COOKIES_FILE = cfg.get("cookies_file") or None
     VOLUME = float(cfg.get("volume", 1.0))
-    MAX_DURATION_MINUTES = int(cfg.get("max_duration_minutes", 180))
-    MAX_QUEUE = int(cfg.get("max_queue", 20))
+    MAX_DURATION_MINUTES = int(cfg.get("max_duration_minutes") or 0)
+    MAX_QUEUE = int(cfg.get("max_queue") or 0)
     IDLE_TIMEOUT = int(cfg.get("idle_timeout_seconds", 300))
     RESOLVE_TIMEOUT = int(cfg.get("resolve_timeout", 60))
     PLAYER_CLIENTS = list(cfg.get("player_clients") or ["android"])
@@ -303,6 +305,7 @@ COMMAND_HELP: list[tuple[str, str]] = [
     ("!queue", "Show what's lined up"),
     ("!np", "Show what's playing right now"),
     ("!pause / !resume", "Pause or resume playback"),
+    ("!timestamp <time>", "Jump to a point in the current track: `1:23`, `1:02:03`, `90` or `1m30s`"),
 ]
 
 
@@ -456,10 +459,15 @@ def _stream_url_from(info: dict) -> str:
 # kind (for the log line) and a human explanation (for chat). These are worth distinguishing
 # because they need DIFFERENT fixes: a cookies file, waiting out a rate limit, a yt-dlp upgrade,
 # or a different `player_clients` setting.
+#
+# ORDER MATTERS - the first match wins. Both of YouTube's sign-in walls start "Sign in to
+# confirm": "...your age" (age-gated) and "...you're not a bot" (bot-check, whose apostrophe is
+# sometimes curly). A bare "sign in to confirm" needle once filed every age-restricted video
+# under bot-check and told the operator to go fix cookies.
 _YT_ERROR_SIGNATURES: tuple[tuple[str, str, str], ...] = (
-    ("sign in to confirm", "bot-check",
-     "YouTube wants me to prove I'm not a bot (set `voice.cookies_file` to fix)"),
     ("confirm your age", "age-gated", "that video is age-restricted"),
+    ("not a bot", "bot-check",
+     "YouTube wants me to prove I'm not a bot (set `voice.cookies_file` to fix)"),
     ("429", "rate-limited", "YouTube is rate-limiting me - try again in a bit"),
     ("too many requests", "rate-limited", "YouTube is rate-limiting me - try again in a bit"),
     ("http error 403", "forbidden", "YouTube refused the request (403)"),
@@ -680,6 +688,7 @@ class GuildPlayer:
         self._finished = asyncio.Event()  # set (from the ffmpeg thread) when a track ends
         self._skip_requested = False      # so a manual skip isn't misread as a failure
         self._play_error: Optional[Exception] = None
+        self._seek_to: Optional[float] = None  # set by seek(); consumed by _play
 
     # --- helpers ---
 
@@ -743,6 +752,14 @@ class GuildPlayer:
         self._wakeup.set()
         return len(self.queue)
 
+    def seek(self, seconds: float) -> None:
+        """Jump the current track to `seconds`: stop the running stream and let _play restart
+        it from there. If the track is still loading, it simply starts at that point."""
+        self._seek_to = float(seconds)
+        vc = self.voice
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop()
+
     def start(self) -> None:
         """Make sure the playback loop is running."""
         if self._task is None or self._task.done():
@@ -805,14 +822,21 @@ class GuildPlayer:
         client-mismatched URL is the usual culprit) and resumes where the audio stopped, so a
         drop mid-song costs a few seconds rather than the song. Retries are logged at WARNING,
         not posted in chat; only giving up is. A !skip/!stop/!leave during a retry ends it.
+
+        `!timestamp` works through the same resume mechanism: seek() records the target and
+        stops the running stream, and this loop restarts it from there with ffmpeg -ss. A seek
+        is not a failure, so it doesn't use up a retry or post a second now-playing line.
         """
         self._skip_requested = False
-        position = 0.0       # seconds of this track already played, summed over attempts
+        self._seek_to = None
+        position = 0.0       # where in the track we are, in seconds
         announced = False
         failure = ""
         attempts = STREAM_RETRIES + 1
-        for attempt in range(attempts):
-            if attempt:
+        attempt = 0          # failed attempts so far
+        retrying = False
+        while True:
+            if retrying:
                 log.warning(f"Retrying {track.title!r} (attempt {attempt + 1}/{attempts}) from "
                             f"{_format_duration(int(position)) if position else 'the start'} "
                             f"after: {failure}")
@@ -821,7 +845,7 @@ class GuildPlayer:
                     return
 
             try:
-                await _refresh_stream_url(track, force=attempt > 0)
+                await _refresh_stream_url(track, force=retrying)
             except Exception as e:
                 if isinstance(e, (asyncio.TimeoutError, TimeoutError)):
                     kind, failure = "timeout", f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s)"
@@ -829,8 +853,10 @@ class GuildPlayer:
                     kind, failure = classify_youtube_error(e)
                 log.warning(f"Could not resolve the stream URL for {track.title!r} [{kind}]: "
                             f"{type(e).__name__}: {str(e)[:300]}")
-                if kind in _PERMANENT_ERROR_KINDS:
+                attempt += 1
+                if kind in _PERMANENT_ERROR_KINDS or attempt >= attempts:
                     break
+                retrying = True
                 continue
             if self._skip_requested:   # skipped while the URL was resolving
                 return
@@ -847,13 +873,24 @@ class GuildPlayer:
             if vc is None or not vc.is_connected():
                 log.warning(f"Voice client gone before {track.title!r} could play; dropping it")
                 return
+            if self._seek_to is not None:   # a !timestamp landed before or during this attempt
+                position, self._seek_to = self._seek_to, None
             played, failure = await self._stream_once(vc, track, position, announce=not announced)
             announced = True
             position += played
+            if self._skip_requested:
+                return
+            if self._seek_to is not None:   # stopped by !timestamp - restart from the target
+                retrying = False
+                continue
             if not failure:
                 return
+            attempt += 1
+            if attempt >= attempts:
+                break
+            retrying = True
 
-        log.error(f"Giving up on {track.title!r} after {attempt + 1} attempt(s): {failure} "
+        log.error(f"Giving up on {track.title!r} after {attempt} attempt(s): {failure} "
                   f"| url={track.webpage_url}")
         await self._announce(_say("playback_failed", title=track.title, error=failure))
 
@@ -942,6 +979,9 @@ class GuildPlayer:
 
         if self._skip_requested:
             log.info(f"Stopped {track.title!r} on request after {offset + played:.0f}s")
+            return ""
+        if self._seek_to is not None:
+            log.info(f"Jumping {track.title!r} from {offset + played:.0f}s to {self._seek_to:.0f}s")
             return ""
         detail = _first_error_line(stderr_text)
         if self._play_error:
@@ -1048,7 +1088,8 @@ def _player_for(guild: discord.Guild) -> GuildPlayer:
 # === Commands ===
 
 _CMD_RE = re.compile(
-    r"^!(play|p|search|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
+    r"^!(play|p|search|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume|timestamp)"
+    r"\b\s*(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -1096,6 +1137,8 @@ async def handle_command(message: discord.Message) -> bool:
         await _cmd_pause(message, player)
     elif command == "resume":
         await _cmd_resume(message, player)
+    elif command == "timestamp":
+        await _cmd_timestamp(message, player, argument)
     return True
 
 
@@ -1152,7 +1195,7 @@ def play_precheck(message: discord.Message) -> Optional[str]:
     _, error = _target_channel(message)
     if error:
         return error
-    if len(_player_for(message.guild).queue) >= MAX_QUEUE:
+    if MAX_QUEUE and len(_player_for(message.guild).queue) >= MAX_QUEUE:
         return _say("queue_full", limit=MAX_QUEUE)
     return None
 
@@ -1268,7 +1311,7 @@ async def enqueue_request(message: discord.Message, query: str,
 
     if resolved.playlist is not None:
         # Re-measured now: the queue may have filled up while yt-dlp was busy.
-        room = MAX_QUEUE - len(player.queue)
+        room = MAX_QUEUE - len(player.queue) if MAX_QUEUE else len(tracks)
         if room <= 0:
             return PlayResult(False, _say("queue_full", limit=MAX_QUEUE))
         overflow = max(0, len(tracks) - room)
@@ -1572,6 +1615,51 @@ async def _cmd_nowplaying(message: discord.Message, player: GuildPlayer) -> None
         f"🎶 **{track.title}** [{_format_duration(track.duration)}] "
         f"— requested by {track.requested_by}\n{track.webpage_url}"
     )
+
+
+_UNIT_TIME_RE = re.compile(r"(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s?)?")
+
+
+def parse_timestamp(text: str) -> Optional[int]:
+    """Seconds from "1:23", "1:02:03", "90", "1m30s", "2h5m"... or None if it isn't a time."""
+    text = (text or "").strip().lower()
+    if not text:
+        return None
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) > 3 or not all(p.isdigit() for p in parts):
+            return None
+        if any(int(p) >= 60 for p in parts[1:]):
+            return None
+        total = 0
+        for part in parts:
+            total = total * 60 + int(part)
+        return total
+    m = _UNIT_TIME_RE.fullmatch(text)
+    if not m or not any(m.groups()):
+        return None
+    hours, minutes, seconds = (int(g or 0) for g in m.groups())
+    return hours * 3600 + minutes * 60 + seconds
+
+
+async def _cmd_timestamp(message: discord.Message, player: GuildPlayer, argument: str) -> None:
+    track = player.current
+    if not player.is_active() or track is None:
+        await message.reply(_say("nothing_playing"))
+        return
+    seconds = parse_timestamp(argument)
+    if seconds is None:
+        await message.reply("Give me a time to jump to: `!timestamp 1:23` (or `90`, `1m30s`).")
+        return
+    if track.duration is None:
+        await message.reply("That one's a livestream — there's nowhere to jump to.")
+        return
+    if seconds >= track.duration:
+        await message.reply(f"**{track.title}** is only {_format_duration(track.duration)} long.")
+        return
+    player.seek(seconds)
+    await message.reply(_say("seeked", title=track.title,
+                             time=_format_duration(seconds) if seconds else "0:00"))
 
 
 async def _cmd_pause(message: discord.Message, player: GuildPlayer) -> None:

@@ -137,6 +137,7 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 | `!queue` | Show what's lined up |
 | `!np` | Show the current track |
 | `!pause`, `!resume` | Pause / resume playback |
+| `!timestamp <time>` | Jump to a point in the current track - `1:23`, `1:02:03`, `90` or `1m30s` |
 
 `!help` lists these plus every other command the bot knows.
 
@@ -157,8 +158,8 @@ templates):
 voice:
   enabled: true
   volume: 1.0
-  max_duration_minutes: 180     # refuse anything longer (0 = no limit)
-  max_queue: 20                 # tracks waiting per server
+  max_duration_minutes: 0       # refuse anything longer (0 = no limit, the default)
+  max_queue: 0                  # tracks waiting per server (0 = no limit, the default)
   idle_timeout_seconds: 300     # leave after this long with an empty queue
   leave_when_alone: true        # leave when the last human leaves the channel
   cookies_file: null            # yt-dlp cookies, if YouTube starts asking
@@ -235,8 +236,12 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
   the studio recording rather than the music video or a live version. No Spotify account needed.
 - **`!search <song>`** shows the top 5 YouTube results with a button for each, so you can pick
   the version you want. Kronk can do the same when asked for options ("show me some versions of…").
-- **No more 10-hour loops by accident**: if the top result for `!play <song>` is over the length
-  limit, the first result that fits is played instead of the request being refused.
+- **`!timestamp <time>`** jumps to a point in the current track (`1:23`, `90`, `1m30s`…).
+- **No queue or length limits by default**: `voice.max_queue` and `voice.max_duration_minutes`
+  now default to 0 (no limit), so whole playlists queue and long videos play. If you set a length
+  limit, `!play <song>` skips over-long top results and plays the first one that fits.
+- **Age-restricted videos are reported correctly**: they were being mistaken for YouTube's
+  bot check, which told you to set up a cookies file when that wasn't the problem.
 
 ### v0.2.10
 

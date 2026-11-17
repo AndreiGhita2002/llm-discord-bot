@@ -245,10 +245,11 @@ voice:
   cookies_file: null
   # Playback volume multiplier (1.0 = as-is).
   volume: 1.0
-  # Refuse anything longer than this, so nobody queues a 10-hour loop. 0 = no limit.
-  max_duration_minutes: 180
-  # Max tracks waiting in line per server (the playing one doesn't count).
-  max_queue: 20
+  # Refuse anything longer than this (minutes). 0 = no limit. When set, `!play <song>` skips
+  # over-long top results for the first one that fits.
+  max_duration_minutes: 0
+  # Max tracks waiting in line per server (the playing one doesn't count). 0 = no limit.
+  max_queue: 0
   # Leave the voice channel after this long with an empty queue.
   idle_timeout_seconds: 300
   # Hard ceiling on a single yt-dlp lookup (it's a blocking network call, run off-loop).
