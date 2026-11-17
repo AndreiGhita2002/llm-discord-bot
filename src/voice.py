@@ -6,7 +6,9 @@ runs on a bare `discord.Client`). They're prefixed with `!` rather than `/` so t
 doesn't trigger Discord's native slash-command autocomplete popup:
 
     !play <search terms | url>   play (or queue) it - in the bot's channel, else the caller's
-                                 (`!p` for short; a playlist link queues the whole playlist)
+                                 (`!p` for short; a playlist link queues the whole playlist;
+                                 a Spotify track/album/playlist link is matched on YouTube)
+    !search <search terms>       show the top YouTube results with buttons to pick one
     !skip                        skip the current track
     !stop                        clear the queue and stop playing (stay connected)
     !leave                       stop and disconnect
@@ -38,6 +40,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import discord
+
+import spotify
 
 log = logging.getLogger("kronk")
 
@@ -93,7 +97,13 @@ RETRY_BACKOFF = 1.5                  # seconds; attempt n waits n * this before 
 # finish - the stream dropped. YouTube durations are whole seconds, so some slack is needed.
 EARLY_END_SLACK = 10.0
 # yt-dlp failure kinds (classify_youtube_error) that a retry can't fix.
-_PERMANENT_ERROR_KINDS = frozenset({"unavailable", "age-gated", "bot-check"})
+_PERMANENT_ERROR_KINDS = frozenset({"unavailable", "age-gated", "bot-check", "no-results"})
+# How many YouTube results a search looks at: the ones !search offers, the fallbacks !play
+# tries when the top hit is over the length limit, and the candidates a Spotify track is
+# matched against.
+SEARCH_RESULTS = 5
+# How long a !search picker's buttons stay live.
+SEARCH_PICKER_TIMEOUT = 120.0
 
 # ffmpeg flags: -vn drops video; the reconnect flags let it recover from a dropped HTTP
 # stream mid-song instead of ending the track early.
@@ -184,6 +194,16 @@ DEFAULT_MESSAGES: dict[str, list[str]] = {
     "youtube_error": [
         "⚠️ YouTube wouldn't give me “{query}” — {error}",
     ],
+    "spotify_error": [
+        "⚠️ I couldn't read that Spotify link — {error}",
+    ],
+    # Heading of the !search picker; the numbered results are listed below it.
+    "search_results": [
+        "🔎 Top results for “{query}” — pick one:",
+    ],
+    "search_link": [
+        "That's a link, not a search — use `!play {query}` to play it.",
+    ],
 }
 
 _messages: dict[str, list[str]] = {k: list(v) for k, v in DEFAULT_MESSAGES.items()}
@@ -273,8 +293,10 @@ def unavailable_reason() -> Optional[str]:
 # eventual shared dispatcher.
 COMMAND_HELP: list[tuple[str, str]] = [
     ("!play <song or url>", "Play the top YouTube result - in my voice channel if I'm in one, "
-                            "otherwise I join yours. A playlist link queues the whole playlist. "
+                            "otherwise I join yours. A playlist link queues the whole playlist; "
+                            "a Spotify track, album or playlist link is found on YouTube. "
                             "`!p` works too"),
+    ("!search <song>", f"Show the top {SEARCH_RESULTS} YouTube results and pick which to play"),
     ("!skip", "Skip the current track"),
     ("!stop", "Stop playing and clear the queue"),
     ("!leave", "Stop and leave the voice channel"),
@@ -324,6 +346,9 @@ class Track:
     # puts "🎶 Now playing: <title> <url>" in the model's reply), so the player loop must not
     # post its own now-playing line as well - that's the same track announced twice.
     suppress_announce: bool = False
+    # Set for a track that came from a Spotify link. Until it's matched to a YouTube upload
+    # (see _match_spotify) its webpage_url is empty; title/duration are Spotify's.
+    spotify_track: Optional[spotify.SpotifyTrack] = None
 
 
 def _format_duration(seconds: Optional[int]) -> str:
@@ -354,20 +379,58 @@ def _ydl_opts(**overrides) -> dict:
     return opts
 
 
+def _entry_url(entry: dict) -> Optional[str]:
+    """The watch URL of a flat (search or playlist) entry."""
+    url = entry.get("webpage_url") or entry.get("url")
+    if not url and entry.get("id") and entry.get("ie_key") == "Youtube":
+        url = f"https://www.youtube.com/watch?v={entry['id']}"
+    return url
+
+
+def _blocking_search(query: str, count: int = SEARCH_RESULTS) -> list[dict]:
+    """The top `count` YouTube results for a phrase, as flat entries (title, url, duration,
+    channel - no media URLs). BLOCKING - call via asyncio.to_thread.
+
+    Flat search is one request, and resolving the chosen entry is one more - the same work
+    `ytsearch1:` does internally, so looking at several results costs nothing extra.
+    """
+    with yt_dlp.YoutubeDL(_ydl_opts(extract_flat=True)) as ydl:
+        info = ydl.extract_info(f"ytsearch{count}:{query}", download=False)
+    return [e for e in ((info or {}).get("entries") or []) if e and _entry_url(e)]
+
+
+def _first_within_limit(entries: list[dict]) -> dict:
+    """The first search result under the duration limit, else the top one (which the caller
+    then rejects as too long, with the usual message)."""
+    return next((e for e in entries if not _too_long(e.get("duration"))), entries[0])
+
+
 def _blocking_resolve(target: str) -> dict:
     """Run yt-dlp for a URL or a search phrase and return the chosen entry's info dict.
 
-    BLOCKING - always call via asyncio.to_thread. A bare phrase is turned into a `ytsearch1:`
-    query so the top YouTube hit is used; anything starting with http(s) is passed straight
-    through (so direct links, and any other site yt-dlp supports, work too).
+    BLOCKING - always call via asyncio.to_thread. Anything starting with http(s) is passed
+    straight through (so direct links, and any other site yt-dlp supports, work too). A bare
+    phrase is searched, and the first of the top SEARCH_RESULTS hits within the duration limit
+    is used - so "!play <song>" whose top hit is a 10-hour loop plays the song instead of
+    refusing.
     """
-    query = target if _URL_RE.match(target) else f"ytsearch1:{target}"
+    if not _URL_RE.match(target):
+        entries = _blocking_search(target)
+        if not entries:
+            raise LookupError("no results")
+        pick = _first_within_limit(entries)
+        if pick is not entries[0]:
+            log.info(f"Top hit for {target!r} ({entries[0].get('title')!r}, "
+                     f"{_format_duration(entries[0].get('duration'))}) is over the length "
+                     f"limit; playing result #{entries.index(pick) + 1} {pick.get('title')!r}")
+        target = _entry_url(pick)
+
     with yt_dlp.YoutubeDL(_ydl_opts()) as ydl:
-        info = ydl.extract_info(query, download=False)
+        info = ydl.extract_info(target, download=False)
 
     if not info:
         raise LookupError("no results")
-    if "entries" in info:  # search results / playlist -> take the first usable entry
+    if "entries" in info:  # a link that turned out to be a list -> take the first entry
         entries = [e for e in (info.get("entries") or []) if e]
         if not entries:
             raise LookupError("no results")
@@ -405,6 +468,7 @@ _YT_ERROR_SIGNATURES: tuple[tuple[str, str, str], ...] = (
     ("removed by the uploader", "unavailable", "that video was taken down"),
     ("requested format is not available", "no-format",
      "no playable audio came back (the `voice.player_clients` setting may need changing)"),
+    ("no results", "no-results", "I couldn't find it on YouTube"),
     ("unable to extract", "extractor-broken",
      "YouTube changed something yt-dlp can't read yet (yt-dlp probably needs updating)"),
     ("page needs to be reloaded", "extractor-broken",
@@ -478,9 +542,7 @@ def _lazy_track(entry: dict, requested_by: str) -> Optional[Track]:
     title = entry.get("title") or ""
     if title.lower() in _DEAD_ENTRY_TITLES:
         return None
-    url = entry.get("webpage_url") or entry.get("url")
-    if not url and entry.get("id") and entry.get("ie_key") == "Youtube":
-        url = f"https://www.youtube.com/watch?v={entry['id']}"
+    url = _entry_url(entry)
     if not url:
         return None
     return Track(
@@ -502,8 +564,58 @@ class Resolved:
     dead: int = 0                    # playlist entries dropped as private/deleted
 
 
+def _spotify_lazy_track(sp: spotify.SpotifyTrack, requested_by: str) -> Track:
+    """A queued Track for a Spotify entry: matched to a YouTube upload when it's about to play
+    (see _match_spotify), so a 100-track playlist doesn't cost 100 searches up front."""
+    return Track(
+        title=sp.display,
+        webpage_url="",
+        duration=sp.duration,
+        stream_url="",
+        uploader=sp.artist_line,
+        requested_by=requested_by,
+        resolved_at=0.0,
+        spotify_track=sp,
+    )
+
+
+async def _resolve_spotify(target: str, requested_by: str) -> Resolved:
+    """A Spotify link -> Tracks to be played from YouTube. Raises spotify.SpotifyError."""
+    item = await asyncio.wait_for(asyncio.to_thread(spotify.fetch, target),
+                                  timeout=RESOLVE_TIMEOUT)
+    log.info(f"Spotify {item.kind} {item.name!r}: {len(item.tracks)} track(s), "
+             f"{item.unplayable} unplayable")
+    tracks = [_spotify_lazy_track(sp, requested_by) for sp in item.tracks]
+    if item.kind == "track":
+        # Matched straight away, so the reply/announcement can link the YouTube upload.
+        await _refresh_stream_url(tracks[0])
+        return Resolved(tracks)
+    return Resolved(tracks, playlist=item.name, dead=item.unplayable)
+
+
+async def _match_spotify(track: Track) -> None:
+    """Find the YouTube upload for a Spotify track and point the Track at it."""
+    sp = track.spotify_track
+    entries = await asyncio.wait_for(asyncio.to_thread(_blocking_search, sp.query),
+                                     timeout=RESOLVE_TIMEOUT)
+    pick = spotify.pick_match(sp, entries)
+    if pick is None:
+        raise LookupError("no results")
+    track.webpage_url = _entry_url(pick)
+    delta = (abs(pick["duration"] - sp.duration)
+             if pick.get("duration") and sp.duration else None)
+    # A big length difference usually means a wrong version (live, extended, music video).
+    level = logging.WARNING if delta is None or delta > 15 else logging.INFO
+    log.log(level, f"Spotify {sp.display!r} ({_format_duration(sp.duration)}) -> YouTube "
+                   f"{pick.get('title')!r} by {pick.get('channel') or pick.get('uploader')} "
+                   f"({_format_duration(pick.get('duration'))}) {track.webpage_url}")
+
+
 async def resolve_request(target: str, requested_by: str = "") -> Resolved:
-    """Resolve a play request: a search phrase, a video link, or a playlist link."""
+    """Resolve a play request: a search phrase, a video link, a playlist link, or a Spotify
+    track/album/playlist link."""
+    if spotify.is_spotify_link(target):
+        return await _resolve_spotify(target, requested_by)
     if not is_playlist_link(target):
         return Resolved([await resolve_track(target, requested_by)])
 
@@ -530,11 +642,14 @@ async def _refresh_stream_url(track: Track, force: bool = False) -> None:
 
     YouTube's direct URLs are time-limited, so a track queued behind a long set could have an
     expired link by the time it plays. Playlist tracks are queued with no URL at all and are
-    resolved here for the first time. `force` re-resolves regardless (a retry after a failed
+    resolved here for the first time - and Spotify tracks are first matched to a YouTube
+    upload here. `force` re-resolves regardless (a retry after a failed
     stream, where the URL itself is the prime suspect).
     """
     if not force and track.stream_url and time.time() - track.resolved_at < STREAM_URL_TTL:
         return
+    if not track.webpage_url and track.spotify_track is not None:
+        await _match_spotify(track)
     info = await asyncio.wait_for(
         asyncio.to_thread(_blocking_resolve, track.webpage_url), timeout=RESOLVE_TIMEOUT
     )
@@ -933,7 +1048,7 @@ def _player_for(guild: discord.Guild) -> GuildPlayer:
 # === Commands ===
 
 _CMD_RE = re.compile(
-    r"^!(play|p|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
+    r"^!(play|p|search|skip|stop|leave|disconnect|queue|np|nowplaying|pause|resume)\b\s*(.*)$",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -965,6 +1080,8 @@ async def handle_command(message: discord.Message) -> bool:
 
     if command in ("play", "p"):
         await _cmd_play(message, argument)
+    elif command == "search":
+        await _cmd_search(message, argument)
     elif command == "skip":
         await _cmd_skip(message, player)
     elif command == "stop":
@@ -1077,6 +1194,9 @@ async def enqueue_request(message: discord.Message, query: str,
     except (asyncio.TimeoutError, TimeoutError):
         log.error(f"YouTube did not answer within {RESOLVE_TIMEOUT}s for {query!r}")
         return PlayResult(False, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
+    except spotify.SpotifyError as e:
+        log.warning(f"Could not read Spotify link {query!r}: {e}")
+        return PlayResult(False, _say("spotify_error", error=str(e)))
     except LookupError:
         log.info(f"No YouTube results for {query!r}")   # a normal outcome, not a fault
         return PlayResult(False, _say("no_results", query=query))
@@ -1142,7 +1262,9 @@ async def enqueue_request(message: discord.Message, query: str,
     # not two. `!play` is unaffected: its caller deletes its own placeholder and relies on the
     # player loop's now-playing line.
     # For a playlist, only its first track is named in the reply; the rest announce normally.
-    tracks[0].suppress_announce = (source == "tool")
+    # A Spotify playlist's first track has no YouTube link yet (it's matched when it plays), so
+    # the reply can't carry one - the player loop announces it instead.
+    tracks[0].suppress_announce = (source == "tool" and bool(tracks[0].webpage_url))
 
     if resolved.playlist is not None:
         # Re-measured now: the queue may have filled up while yt-dlp was busy.
@@ -1226,6 +1348,163 @@ async def _cmd_play(message: discord.Message, query: str) -> None:
         await _delete_quietly(status)   # the player loop posts "now playing" instead
     else:
         await _edit_or_send(status, message, result.message)
+
+
+# === !search: offer the top results with buttons to pick one ===
+
+@dataclass
+class _Requester:
+    """Who a picker button press acts for. enqueue_request only reads author/guild/channel
+    from its message, so a press goes down exactly the same path as a typed !play - same
+    precheck, limits, channel choice and logging."""
+    author: discord.abc.User
+    guild: discord.Guild
+    channel: discord.abc.Messageable
+
+
+def _search_line(number: int, entry: dict) -> str:
+    title = discord.utils.escape_markdown((entry.get("title") or "Unknown title")[:90])
+    channel = entry.get("channel") or entry.get("uploader") or ""
+    line = f"**{number}.** {title} [{_format_duration(entry.get('duration'))}]"
+    if channel:
+        line += f" · {discord.utils.escape_markdown(channel)}"
+    if _too_long(entry.get("duration")):
+        line += " ⛔ too long"
+    return line
+
+
+class SearchPicker(discord.ui.View):
+    """Numbered buttons under a list of search results. Only the person who searched can pick;
+    results over the duration limit get a disabled button. Picking one queues it through
+    enqueue_request, the same path as !play."""
+
+    def __init__(self, query: str, entries: list[dict], requester_id: int, source: str):
+        super().__init__(timeout=SEARCH_PICKER_TIMEOUT)
+        self.query = query
+        self.entries = entries
+        self.requester_id = requester_id
+        self.source = source
+        self.message: Optional[discord.Message] = None
+        self._done = False   # a fast double-click must not queue the track twice
+        for index, entry in enumerate(entries):
+            button = discord.ui.Button(label=str(index + 1), style=discord.ButtonStyle.primary,
+                                       disabled=_too_long(entry.get("duration")))
+            button.callback = self._picker_for(index)
+            self.add_item(button)
+        cancel = discord.ui.Button(label="Cancel", style=discord.ButtonStyle.secondary)
+        cancel.callback = self._cancel
+        self.add_item(cancel)
+
+    def render(self) -> str:
+        lines = [_say("search_results", query=self.query)]
+        lines += [_search_line(i, e) for i, e in enumerate(self.entries, start=1)]
+        return "\n".join(lines)[:1900]
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requester_id:
+            return True
+        await interaction.response.send_message(
+            "Only whoever searched can pick from this one — try `!search` yourself.",
+            ephemeral=True)
+        return False
+
+    def _finish(self) -> bool:
+        """Close the picker. False if it was already closed (by another click or the timer)."""
+        if self._done:
+            return False
+        self._done = True
+        self.stop()
+        return True
+
+    def _picker_for(self, index: int):
+        async def callback(interaction: discord.Interaction) -> None:
+            await self._pick(interaction, index)
+        return callback
+
+    async def _pick(self, interaction: discord.Interaction, index: int) -> None:
+        if not self._finish():
+            await interaction.response.defer()
+            return
+        entry = self.entries[index]
+        title = discord.utils.escape_markdown(entry.get("title") or "that one")
+        # Answer the interaction first (Discord allows 3s); the lookup below takes longer.
+        await interaction.response.edit_message(
+            content=f"🔎 “{self.query}” → **{title}**", view=None)
+        log.info(f"[{self.source}] {interaction.user} picked #{index + 1} "
+                 f"{entry.get('title')!r} for {self.query!r}")
+        try:
+            result = await enqueue_request(
+                _Requester(interaction.user, interaction.guild, interaction.channel),
+                _entry_url(entry), source=self.source)
+        except Exception as e:
+            log.exception(f"[{self.source}] queueing a picked search result failed")
+            await interaction.followup.send(_say("error", error=str(e)[:200]))
+            return
+        if not (result.started and result.playlist is None):   # else the player announces it
+            await interaction.followup.send(result.message)
+
+    async def _cancel(self, interaction: discord.Interaction) -> None:
+        if not self._finish():
+            await interaction.response.defer()
+            return
+        await interaction.response.edit_message(
+            content=f"🔎 Search for “{self.query}” cancelled.", view=None)
+
+    async def on_timeout(self) -> None:
+        if not self._finish() or self.message is None:
+            return
+        try:
+            await self.message.edit(content=self.render() + "\n*(expired — run `!search` again)*",
+                                    view=None)
+        except Exception as e:
+            log.debug(f"Could not expire search picker: {e}")
+
+
+@dataclass
+class SearchOffer:
+    """Outcome of offering a search picker."""
+    ok: bool
+    message: str                 # error line on failure; a summary of what was offered on success
+    entries: list[dict] = field(default_factory=list)
+
+
+async def offer_search(message: discord.Message, query: str,
+                       source: str = "search") -> SearchOffer:
+    """Search YouTube and post the top results with buttons to pick one. Used by `!search`
+    and the LLM's search_music tool. Nothing is queued until the requester picks."""
+    error = play_precheck(message)
+    if error:
+        return SearchOffer(False, error)
+    if _URL_RE.match(query):
+        return SearchOffer(False, _say("search_link", query=query))
+
+    log.info(f"[{source}] search {query!r} for {getattr(message.author, 'display_name', '?')}")
+    try:
+        entries = await asyncio.wait_for(asyncio.to_thread(_blocking_search, query),
+                                         timeout=RESOLVE_TIMEOUT)
+    except (asyncio.TimeoutError, TimeoutError):
+        log.error(f"YouTube search did not answer within {RESOLVE_TIMEOUT}s for {query!r}")
+        return SearchOffer(False, f"YouTube took too long to answer (>{RESOLVE_TIMEOUT}s).")
+    except Exception as e:
+        kind, hint = classify_youtube_error(e)
+        log.error(f"Unexpected YouTube response searching {query!r} [{kind}]: "
+                  f"{type(e).__name__}: {str(e)[:400]}")
+        return SearchOffer(False, _say("youtube_error", query=query, error=hint))
+    if not entries:
+        return SearchOffer(False, _say("no_results", query=query))
+
+    view = SearchPicker(query, entries, message.author.id, source)
+    view.message = await message.reply(view.render(), view=view, mention_author=False)
+    return SearchOffer(True, view.render(), entries)
+
+
+async def _cmd_search(message: discord.Message, query: str) -> None:
+    if not query:
+        await message.reply("Give me something to look for: `!search <song name>`")
+        return
+    offer = await offer_search(message, query, source="search")
+    if not offer.ok:
+        await message.reply(offer.message)
 
 
 async def _edit_or_send(status, message: discord.Message, text: str) -> None:

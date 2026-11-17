@@ -11,7 +11,8 @@ All bot settings (model, personality, memory) are customizable via `config.yaml`
 - Configurable message history for conversation context
 - **Memory system** with user summaries and conversation recall (can be toggled on/off)
 - Optional web search capability for up-to-date information
-- **YouTube audio in voice channels** — `!play <song name or link>` and the bot joins your voice channel
+- **YouTube audio in voice channels** — `!play <song name or link>` and the bot joins your voice channel.
+  Spotify track/album/playlist links work too (played from YouTube)
 
 ## Requirements
 
@@ -124,10 +125,12 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 
 | Command | What it does |
 | --- | --- |
-| `!play <search terms>` | Joins your voice channel and plays the top YouTube result |
+| `!play <search terms>` | Joins your voice channel and plays the top YouTube result (skipping results over the length limit) |
 | `!play <url>` | Same, but for a direct link |
 | `!play <playlist url>` | Queues the whole playlist (from the linked video, if the link has one) |
+| `!play <spotify link>` | Finds the Spotify track, album or playlist on YouTube and plays that |
 | `!p ...` | Short for `!play` |
+| `!search <search terms>` | Lists the top 5 YouTube results with a button for each - pick one to play it |
 | `!skip` | Skip the current track |
 | `!stop` | Stop and clear the queue (stays connected) |
 | `!leave` | Stop and disconnect |
@@ -140,6 +143,12 @@ prefix so typing one doesn't pop up Discord's slash-command autocomplete:
 Once the bot is in a voice channel, anyone can queue to it - including people who aren't in
 voice at all. Someone sitting in a *different* voice channel is asked to come join instead of
 the bot being pulled away from its listeners.
+
+**Spotify links**: Spotify's audio is DRM-protected, so it can't be streamed. Instead the bot
+reads the track names from the link and plays each one from YouTube, picking the upload whose
+length matches Spotify's. This avoids music videos with long intros and live or remixed versions.
+It needs no Spotify account or API key. Album and playlist tracks are looked up when they come
+up to play, and Spotify only shows the first 100 tracks of a playlist.
 
 **Config** (`voice:` block — see `kronk_config.yaml` for all options and Kronk-voiced message
 templates):
@@ -218,6 +227,16 @@ than deterministic, the report is a pass *rate*: treat a single run as noise.
 - **`!help`** to list every command
 
 ## Changelog
+
+### v0.2.11
+
+- **Spotify links**: `!play <spotify link>` (or asking Kronk with one) plays a Spotify track,
+  album or playlist by finding each track on YouTube. Matches use the track's length, so you get
+  the studio recording rather than the music video or a live version. No Spotify account needed.
+- **`!search <song>`** shows the top 5 YouTube results with a button for each, so you can pick
+  the version you want. Kronk can do the same when asked for options ("show me some versions of…").
+- **No more 10-hour loops by accident**: if the top result for `!play <song>` is over the length
+  limit, the first result that fits is played instead of the request being refused.
 
 ### v0.2.10
 

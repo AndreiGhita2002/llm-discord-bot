@@ -289,6 +289,27 @@ async def _queue_song(args: dict, ctx: ToolContext) -> str:
             f"do not repeat the URL yourself)")
 
 
+async def _search_music(args: dict, ctx: ToolContext) -> str:
+    """Post the top YouTube results for a song with buttons the user picks from.
+
+    Same picker as `!search` (voice.offer_search). Nothing is queued by this call - the click
+    does that, through the same path as `!play` - so the result says so plainly, or the model
+    would announce a song as playing that nobody has picked yet.
+    """
+    if ctx.message is None:
+        return "Searching for music needs an active channel context."
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "No search was given, so nothing was posted."
+    print(f"[TOOL] search_music: {query}")
+    offer = await voice.offer_search(ctx.message, query, source="tool-search")
+    if not offer.ok:
+        return f"Could not search: {offer.message}"
+    return ("Posted these results in the channel with a button for each - the user picks "
+            "one and it plays. NOTHING is queued yet, so don't say anything is playing; just "
+            "tell them to pick one. Results:\n" + offer.message)
+
+
 # ======================================================================================
 # Knowledge / utility tools
 # ======================================================================================
@@ -576,11 +597,21 @@ _REGISTRY: list[Tool] = [
         "queue_song",
         "Play or queue a song in your current voice channel, or the user's if you aren't in "
         "one. Use this whenever someone asks you to play, put on, or queue music. Accepts a "
-        "song name, an artist, or a YouTube URL - a playlist URL queues the whole playlist.",
+        "song name, an artist, a YouTube URL (a playlist URL queues the whole playlist), or "
+        "a Spotify track/album/playlist link (played from YouTube).",
         {"query": {"type": "string",
-                   "description": "Song/artist to search for, or a YouTube video/playlist URL."}},
+                   "description": "Song/artist to search for, or a YouTube or Spotify link."}},
         ["query"],
     ), _queue_song, needs_discord=True, needs_voice=True),
+    Tool("search_music", _fn(
+        "search_music",
+        "Show the user the top YouTube results for a song, with buttons to pick which one to "
+        "play. Use this when someone wants to see the options or choose a version themselves "
+        "('show me some versions of X', 'which X is there', 'let me pick'). If they just ask "
+        "you to play something, call queue_song instead.",
+        {"query": {"type": "string", "description": "Song/artist to search YouTube for."}},
+        ["query"],
+    ), _search_music, needs_discord=True, needs_voice=True),
 
     # --- knowledge / utility ---
     Tool("wikipedia", _fn(

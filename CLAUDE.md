@@ -24,7 +24,8 @@ All Python code lives in `src/`; configs, scripts and runtime state live in the 
 
 - `src/main.py` - Main bot code (entry point: `uv run python src/main.py`)
 - `src/tools.py` - Tool registry (schemas + handlers + config gating) for native tool calling
-- `src/voice.py` - YouTube audio playback in voice channels (`!play` and friends)
+- `src/voice.py` - YouTube audio playback in voice channels (`!play`, `!search` and friends)
+- `src/spotify.py` - Reads Spotify links (public embed page) and matches tracks to YouTube uploads
 - `src/memory.py` - Lightweight memory system (user summaries + conversation recall), SQLite + sqlite-vec backed
 - `src/discord_logging.py` - Optional per-server Discord log channel (`/setlogchannel`)
 - `src/claims.py` - Detects replies that claim an action no tool performed (see below)
@@ -108,7 +109,7 @@ add a `DEFAULT_ANNOUNCEMENTS` entry (list of variants) so the bot posts "Looking
 **Available tools** (each toggled in `tools:` config):
 - Web (need `OLLAMA_API_KEY`): `web_search`, `web_fetch`
 - Fun/social: `roll_dice`, `flip_coin`, `random_choice`, `set_reminder`, `create_poll`, `start_thread`
-- Voice (needs voice playback working): `queue_song`
+- Voice (needs voice playback working): `queue_song`, `search_music` (posts the `!search` picker)
 - Knowledge: `wikipedia` (no key needed), `calculator` (safe AST eval), `get_time`
 - Embodiment: `add_reaction`, `set_status`, `set_nickname`, `get_user_info`
 - Memory (need `memory.do_memory`): `remember_fact`, `recall`
@@ -479,6 +480,42 @@ explanation, because each needs a different fix (cookies file / wait / change pl
 upgrade yt-dlp). Anything unrecognised is logged as `unexpected` at ERROR - that's the signal
 YouTube changed in a way this code hasn't seen. "No results" stays at INFO; it isn't a fault.
 
+**Search fallback for `!play <phrase>`**: a phrase is searched flat (`ytsearch5`, one request,
+no media URLs) and the first result within `max_duration_minutes` is resolved - so a top hit
+that's a 10-hour loop gives way to the actual song. This costs the same as the old `ytsearch1`
+(yt-dlp does a search and then a video page either way). If nothing fits, the top hit is used
+and refused with the normal `too_long` message. It lives in `_blocking_resolve`, so the
+`queue_song` tool gets it too.
+
+**`!search <phrase>`** (`offer_search` + `SearchPicker`): posts the top `SEARCH_RESULTS` with
+numbered buttons (a `discord.ui.View` - works on the bare `discord.Client`). Only the person who
+searched can pick; results over the limit get a disabled button; a double click is ignored
+(`_finish`). A pick goes through `enqueue_request` with a `_Requester(author, guild, channel)`
+stand-in for the message, so a button press takes exactly the same path as `!play`. Source
+`"search"`/`"tool-search"` - NOT `"tool"`, since there's no LLM reply to announce the track, so
+the player loop must. The `search_music` tool posts the same picker and tells the model that
+nothing is queued yet (or it would announce a song nobody has picked).
+
+**Spotify links** (`spotify.py`): Spotify audio is DRM-protected and can't be streamed, so a
+Spotify track/album/playlist link is read for metadata and each track is played from a matching
+YouTube upload. Metadata comes from the PUBLIC EMBED page
+(`open.spotify.com/embed/<kind>/<id>`, JSON in `__NEXT_DATA__`): no key, and its format is
+undocumented, so `parse_embed` raises `SpotifyError` with a readable reason rather than guessing.
+The Web API was rejected on purpose: since Feb 2026 dev mode needs a Premium owner, and it omits
+the track list of any playlist you don't own. The embed caps track lists at 100 and has no ISRC
+(only the Web API has that - searching YouTube for `"<ISRC>"` does find the exact recording, if
+ISRC matching is ever wanted). `pick_match` scores `ytsearch5` results: a duration within 2s of
+Spotify's is the main signal (official music videos run long with intros), titles that add
+`live`/`remix`/`slowed`/… not in the Spotify title are penalised, and the artist's own channel or
+a `- Topic` channel gets a bonus. Match quality is logged at INFO, and at WARNING if the duration
+is off by more than 15s. A single track is matched immediately so its YouTube link can be
+announced. Album/playlist tracks are queued with `Track.spotify_track` set and an empty
+`webpage_url`, and `_refresh_stream_url` matches them when they reach the front of the queue
+(`_match_spotify`). A tool-queued Spotify playlist's first track therefore has no link for
+the reply, so `suppress_announce` is only set when there IS a URL - otherwise the track would
+play unannounced. A failed match raises `LookupError("no results")`, classified as `no-results`,
+which `_play` doesn't retry (`_PERMANENT_ERROR_KINDS`).
+
 **Requirements**: `yt-dlp` + `PyNaCl` + `davey` (pip) and `ffmpeg` + libopus (system;
 `brew install ffmpeg` covers both on macOS). All are checked in `configure()` at startup *and*
 per command, so a missing piece degrades to a clear chat message. libopus isn't always on the
@@ -525,6 +562,10 @@ announcements - neutral defaults in `DEFAULT_MESSAGES`, Kronk-voiced overrides i
 [ ] Live-verify voice playback on the deployed bot: after the `davey` and player-client fixes, confirm audio actually reaches a voice channel. Unit + mock-integration tested (queue order, skip, stop, idle disconnect, all `!play` gating paths) and yt-dlp search/stream-URL resolution verified against real YouTube, but no audio has been pushed to a real voice channel yet. Needs the Connect/Speak permissions.
 [ ] Standardise the command set: `voice.py` uses `!play`/`!skip`/… but `discord_logging.py` still uses `/setlogchannel` and `/clearlogchannel`, so the bot answers to two different prefixes (`!help` lists both, but it reads as an inconsistency). Settle on one (`!` avoids colliding with Discord's slash-command autocomplete popup) and move the log commands over. Each module still matches its own regex with `on_message` calling them in sequence - worth factoring into one shared dispatcher (name -> handler + help text) so adding a command is a single entry, the way `tools.py` does it. `COMMAND_HELP` is the first step of that: the help text already lives next to each module's regexes.
 [x] Playlist URLs queue the whole playlist (lazily resolved), `!p` alias, and failed streams are retried with resume - see the Voice Playback section. Live-verify the mid-song resume (`-ss` on a real YouTube stream) on the deployed bot; it's only been tested against a fake voice client.
+[x] Spotify links (track/album/playlist) play via YouTube matches, `!search` picker + `search_music` tool, and `!play` skips top hits over the length limit. Tests: `evals/test_music.py` (19 checks, no network). The Spotify -> YouTube match was verified live against real Spotify/YouTube; the picker buttons have only been tested with fake interactions.
+[ ] Live-verify `!search` buttons on real Discord, and that a `spotify.link/...` short link expands (no real short link was available to test; `_expand_short_link` follows the redirect and falls back to scraping the page body).
+[ ] Spotify embed format is undocumented - if Spotify links start failing with "format may have changed", inspect `open.spotify.com/embed/track/<id>`'s `__NEXT_DATA__` and update `spotify.parse_embed`.
+[ ] Add an eval case for `search_music` vs `queue_song` (e.g. "show me some versions of Hallelujah" should call search_music, "play Hallelujah" should call queue_song) - not yet measured on the deployed model.
 [ ] `max_queue` (default 20) also caps playlists, so a 50-track playlist queues 20. Consider a higher default now that playlists exist.
 [ ] Song queue improvements: the basics are already in (`GuildPlayer.queue`, in-order playback, `!queue`, `!skip`, `max_queue` cap, playlists). Missing: shuffle and loop/repeat modes, removing or reordering entries (`!remove <n>`, `!move <from> <to>`), paging for long queues (`!queue` truncates at 10 with no way to see the rest), a "up next" hint when a track ends, and persisting the queue across restarts the way reminders are persisted.
 [x] Expose music to the LLM: the `queue_song` tool lets the model queue tracks ("kronk, put on some jazz"). It routes through `voice.enqueue_request()`, the same path `!play` uses, so the model can't bypass the duration limit, queue cap or permission checks, and it only ever plays in the channel it's already in or joins the *requester's* current one - never one of its own choosing. Gated off entirely when voice playback isn't available.
@@ -558,5 +599,6 @@ uv run python src/main.py
 # Tests (no Discord token or running bot needed)
 uv run python evals/test_claims.py    # false-claim detector, ~ms
 uv run python evals/test_guard.py     # the correction round in query_ollama, ~ms
+uv run python evals/test_music.py     # Spotify parsing/matching, !search picker, length fallback, ~ms
 uv run python evals/run_evals.py      # tool-calling evals - needs Ollama + the model
 ```

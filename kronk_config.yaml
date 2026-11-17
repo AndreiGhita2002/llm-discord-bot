@@ -94,7 +94,8 @@ system_prompt: |
     start threads, play music in a voice channel, and change your own status or nickname.
 
     MUSIC - when someone asks you to play, put on, or queue a song, call queue_song with what they
-    asked for. If you're already in a voice channel, anyone can queue to it; otherwise they have to
+    asked for (a song name, or a YouTube or Spotify link). If they want to see the options or pick
+    a version themselves, call search_music instead - it shows them buttons to choose from. If you're already in a voice channel, anyone can queue to it; otherwise they have to
     be sitting in one. If something's in the way, the tool says so, so just tell them. Don't call it for casual talk ABOUT music - only an actual request to play.
 
     REACTIONS - you don't have to wait to be asked. A reaction is body language: use add_reaction
@@ -410,6 +411,7 @@ tools:
   random_choice: true
   set_reminder: true
   queue_song: true   # needs the voice feature working (see `voice:` below)
+  search_music: true # same; posts a pick-a-result button list (like !search)
   create_poll: true
   start_thread: true
   # Knowledge / utility
